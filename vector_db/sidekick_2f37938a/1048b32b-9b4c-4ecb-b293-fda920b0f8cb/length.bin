@@ -1,0 +1,8 @@
+am(M, g ) =
+∫
+M
+um(M, g ) dνg ,
+where um(M, g ) is a universal polynomial in the components of the curvatur e tensor and its
+covariant derivatives. Unfortunately, explicit formulae are known in only a few cases.
+In [ LSS] we saw that for a compact locally homogeneous three-manifo ld ( M, g ) modeled
+on a simply-connected unimodular Lie group equipped with a l eft-invariant metric, the heatshdic

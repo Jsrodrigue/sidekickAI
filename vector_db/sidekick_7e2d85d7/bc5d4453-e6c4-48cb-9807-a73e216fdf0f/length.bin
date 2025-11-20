@@ -1,0 +1,12 @@
+return result
+
+# -------------------- Chat function --------------------
+async def chat(user_id, folder_path, message):
+    """Handle conversation: ensure directory indexed, append message, invoke graph, save session."""
+    if not user_id:
+        return [], "Please log in first"
+    if message is None:
+        message = ""
+    message = message.strip()
+    if not message:
+        return [], ""d 
