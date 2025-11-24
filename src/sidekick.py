@@ -1,357 +1,412 @@
 import os
+import shutil
+import glob
 import uuid
-from typing import List, Any, Optional, Dict, Annotated
 from datetime import datetime
-from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from typing import Any, Dict, Optional, List
 
-from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode
-from langgraph.checkpoint.memory import MemorySaver
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from dotenv import load_dotenv
+
+# LangChain / LangGraph imports
+from langchain_community.document_loaders import (
+    PyPDFLoader,
+    PythonLoader,
+    TextLoader,
+    UnstructuredMarkdownLoader,
+)
+from langchain_community.vectorstores import Chroma
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
-from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader, TextLoader, PythonLoader
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
+
+from src.output_models import EvaluatorOutput
+from src.state import SidekickState
 
 load_dotenv(override=True)
 
-
-class SidekickState(BaseModel):
-
-    messages: Annotated[List[Any], add_messages] = Field(default_factory=list)
-
-    # REQUIRED FOR LANGGRAPH CHECKPOINTER
-    thread_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-
-    session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    success_criteria: Optional[str] = None
-    task_metadata: Dict[str, Any] = Field(default_factory=dict)
-
-    current_directory: Optional[str] = None
-    indexed_directories: List[str] = Field(default_factory=list)
-
-    evaluation_history: List[Dict[str, Any]] = Field(default_factory=list)
-    criteria_met: bool = False
-    needs_user_input: bool = False
-
-    class Config:
-        arbitrary_types_allowed = True
+VECTORSTORE_ROOT = os.environ.get("VECTORSTORE_ROOT", "vector_db")
+os.makedirs(VECTORSTORE_ROOT, exist_ok=True)
 
 
-# ------------------------
-# Schemas estructurados
-# ------------------------
-class EvaluatorOutput(BaseModel):
-    feedback: str = Field(description="Retroalimentación sobre la respuesta")
-    success_criteria_met: bool = Field(description="Si se cumplieron los criterios")
-    user_input_needed: bool = Field(description="Si se necesita más input del usuario")
-    confidence: float = Field(description="Confianza en la evaluación (0-1)", ge=0, le=1)
-
-# ------------------------
-# Sidekick
-# ------------------------
 class Sidekick:
+    """Robust Sidekick implementation with safe loaders, persistent vectorstores,
+    exclusion rules, and threaded indexing to avoid blocking the event loop.
+
+    Key features:
+    - Uses UnstructuredMarkdownLoader for .md files (handles frontmatter/encoding)
+    - Normalizes and validates file paths returned by loaders
+    - Excludes virtualenvs and __pycache__ directories
+    - Persists Chroma vectorstores per-folder and keeps mapping in memory
+    - Removes vectorstore directory on folder removal or forced reindex
+    - Provides synchronous methods intended to be called via asyncio.to_thread
+    """
+
     def __init__(self, api_key: Optional[str] = None):
         api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.sidekick_id = str(uuid.uuid4())
-        
+
         # LLMs
         self.worker_llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=api_key, temperature=0)
         self.evaluator_llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=api_key, temperature=0)
-        
+
         # Embeddings and storage
         self.emb = OpenAIEmbeddings(openai_api_key=api_key)
+        # registry maps normalized folder_path -> retriever
         self.retriever_registry: Dict[str, Any] = {}
-        
-        # Memory
+        # vectorstore_paths maps folder_path -> persist_dir on disk
+        self.vectorstore_paths: Dict[str, str] = {}
+
+        # Memory and graph
         self.memory = MemorySaver()
         self.graph = None
-        
-        # Tools to be created in setup
         self.tools = []
 
+    # ------------------------
+    # Setup
+    # ------------------------
     async def setup(self):
-        """Inicializa el grafo y las herramientas"""
-        # Crear tool con closure para acceder al registry
+        """Create tools and graph. Safe to call from an asyncio context."""
+
         @tool
         def search_documents(query: str, k: int = 5) -> str:
             """
-            Busca información en los documentos del directorio activo.
-            
-            Args:
-                query: La consulta de búsqueda
-                k: Número de documentos a retornar
+            Search relevant information in the documents of the active directory.
+
+            This tool executes a Retrieval-Augmented Generation (RAG) query using the
+            current directory configured in the Sidekick state. It retrieves the top-k
+            most relevant chunks and returns a text response summarizing the findings.
+
+            Parameters
+            ----------
+            query : str
+                Natural-language question or search instruction used to query the
+                document index.
+            k : int, optional
+                Number of most relevant retrieved chunks. Defaults to 5.
+
+            Returns
+            -------
+            str
+                A plain-text summary generated from the retrieved documents.
             """
             return self._rag_query(query, k)
-        
+
         self.tools = [search_documents]
         self.worker_llm_with_tools = self.worker_llm.bind_tools(self.tools)
         self.evaluator_llm_with_output = self.evaluator_llm.with_structured_output(EvaluatorOutput)
-        
+
         await self.build_graph()
 
     # ------------------------
-    # RAG: Indexation
+    # Utilities
     # ------------------------
-    def load_and_register_directory(self, directory: str) -> str:
-        """Indexa un directorio (txt, md, py, pdf) excluyendo .venv, venv y __pycache__."""
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        try:
+            return os.path.normpath(path) if path else ""
+        except Exception:
+            return path
+
+    @staticmethod
+    def _is_excluded_path(path: str, excluded_dirs: Optional[List[str]] = None) -> bool:
+        if not path:
+            return True
+        excluded_dirs = excluded_dirs or [".venv", "venv", "__pycache__"]
+        parts = Sidekick._normalize_path(path).replace("\\", "/").split("/")
+        return any(ex in parts for ex in excluded_dirs)
+
+    # ------------------------
+    #         Indexing
+    # ------------------------
+    def load_and_register_directory(self, directory: str, force_reindex: bool = False) -> str:
+        """Index a directory. This is synchronous and potentially IO-heavy —
+        call it inside asyncio.to_thread to avoid blocking the event loop.
+
+        Returns a human-readable status string.
+        """
+        directory = self._normalize_path(directory)
 
         if not directory or not os.path.exists(directory):
-            return f"❌ Invalid directory: {directory}"
+            return f"[ERROR] Invalid directory: {directory}"
 
-        excluded_dirs = {".venv", "venv", "__pycache__"}
+        # Canonical key for registry
+        folder_key = os.path.abspath(directory)
 
-        def is_excluded(path: str) -> bool:
-            """Verifica si la ruta contiene directorios excluidos."""
-            norm = path.replace("\\", "/")
-            parts = norm.split("/")
-            return any(ex in parts for ex in excluded_dirs)
+        # If already indexed and not forcing reindex, reuse
+        if folder_key in self.retriever_registry and not force_reindex:
+            return f"[INFO] Already indexed: {directory}"
 
-        docs = []
+        # If reindexing, remove previous vectorstore and registry entry
+        if force_reindex and folder_key in self.vectorstore_paths:
+            prev = self.vectorstore_paths.pop(folder_key, None)
+            if prev and os.path.exists(prev):
+                try:
+                    shutil.rmtree(prev)
+                except Exception as e:
+                    print(f"[WARNING] Failed to delete old vectorstore {prev}: {e}")
+            self.retriever_registry.pop(folder_key, None)
 
-        # Loaders normales (txt, md, py)
-        loaders = [
-            DirectoryLoader(directory, glob="**/*.txt", loader_cls=TextLoader, show_progress=True),
-            DirectoryLoader(directory, glob="**/*.md", loader_cls=TextLoader, show_progress=True),
-            DirectoryLoader(directory, glob="**/*.py", loader_cls=PythonLoader, show_progress=True),
-        ]
+        excluded_dirs = [".venv", "venv", "__pycache__"]
 
-        for loader in loaders:
-            try:
-                loaded = loader.load()
-                for doc in loaded:
-                    src = doc.metadata.get("source", "")
-                    if not is_excluded(src):
-                        docs.append(doc)
-            except Exception as e:
-                print(f"⚠️ Error cargando con {loader.__class__.__name__}: {e}")
+        docs: List[Any] = []
 
-        # PDFs: carga manual
-        import glob as glob_module
-        pdf_pattern = os.path.join(directory, "**/*.pdf")
-        pdf_files = glob_module.glob(pdf_pattern, recursive=True)
+        # --- Manual MD loading ---
+        try:
+            md_paths = glob.glob(os.path.join(directory, "**", "*.md"), recursive=True)
+            for md_path in md_paths:
+                if self._is_excluded_path(md_path, excluded_dirs):
+                    continue
+                md_path = self._normalize_path(md_path)
+                if not os.path.isfile(md_path):
+                    print(f"[WARNING] MD file not found/skipping: {md_path}")
+                    continue
+                try:
+                    loader = UnstructuredMarkdownLoader(md_path)
+                    loaded = loader.load()
+                    docs.extend(loaded)
+                    print(f"📘 MD loaded: {md_path}")
+                except Exception as e:
+                    print(f"[ERROR] Error loading MD {md_path}: {e}")
+        except Exception as e:
+            print(f"[ERROR] Error scanning MD files: {e}")
 
-        for pdf_path in pdf_files:
-            if is_excluded(pdf_path):
-                continue
-            
-            try:
-                loader = PyPDFLoader(pdf_path)
-                pdf_docs = loader.load()
-                docs.extend(pdf_docs)
-                print(f"✅ PDF cargado: {os.path.basename(pdf_path)}")
-            except Exception as e:
-                print(f"⚠️ Error cargando PDF {pdf_path}: {e}")
+        # --- Other text-like files (.txt, .py) via DirectoryLoader but filtered ---
+        try:
+            # Text files
+            txt_paths = glob.glob(os.path.join(directory, "**", "*.txt"), recursive=True)
+            for p in txt_paths:
+                if self._is_excluded_path(p, excluded_dirs):
+                    continue
+                try:
+                    loader = TextLoader(p, encoding="utf-8")
+                    docs.extend(loader.load())
+                except UnicodeDecodeError:
+                    try:
+                        loader = TextLoader(p, encoding="latin-1")
+                        docs.extend(loader.load())
+                    except Exception as e:
+                        print(f"⚠️ Failed to load text {p}: {e}")
+
+            # Python files
+            py_paths = glob.glob(os.path.join(directory, "**", "*.py"), recursive=True)
+            for p in py_paths:
+                if self._is_excluded_path(p, excluded_dirs):
+                    continue
+                try:
+                    loader = PythonLoader(p)
+                    docs.extend(loader.load())
+                except Exception as e:
+                    print(f"⚠️ Failed to load python file {p}: {e}")
+        except Exception as e:
+            print(f"⚠️ Error scanning txt/py files: {e}")
+
+        # --- PDFs ---
+        try:
+            pdf_paths = glob.glob(os.path.join(directory, "**", "*.pdf"), recursive=True)
+            for p in pdf_paths:
+                if self._is_excluded_path(p, excluded_dirs):
+                    continue
+                try:
+                    loader = PyPDFLoader(p)
+                    docs.extend(loader.load())
+                    print(f"✅ PDF loaded: {p}")
+                except Exception as e:
+                    print(f"⚠️ Error loading PDF {p}: {e}")
+        except Exception as e:
+            print(f"⚠️ Error scanning PDFs: {e}")
 
         if not docs:
-            return "❌ No se encontraron documentos legibles"
+            return "❌ No readable documents found"
 
-        # Metadata extra
+        # Add normalized metadata and validate sources
+        valid_docs = []
         for doc in docs:
-            src = doc.metadata.get("source", "")
-            doc.metadata["file_name"] = os.path.basename(src)
-            doc.metadata["file_path"] = src
+            src = self._normalize_path(doc.metadata.get("source", ""))
+            if not src or not os.path.exists(src):
+                # In some loaders the source may be empty — still keep doc but mark
+                print(f"[WARNING] Document has invalid source metadata, marking source as unknown: {src}")
+                doc.metadata["file_name"] = doc.metadata.get("file_name") or "unknown"
+                doc.metadata["file_path"] = src
+            else:
+                doc.metadata["file_name"] = os.path.basename(src)
+                doc.metadata["file_path"] = src
             doc.metadata["indexed_at"] = datetime.now().isoformat()
+            valid_docs.append(doc)
 
-        # Chunks
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=600,
-            chunk_overlap=20,
-            length_function=len,
-        )
-        chunks = splitter.split_documents(docs)
+        # Chunk documents
+        splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=20)
+        try:
+            chunks = splitter.split_documents(valid_docs)
+        except Exception as e:
+            print(f"[ERROR] Error splitting documents: {e}")
+            return "[ERROR] Error during splitting"
 
-        # Vectorstore persistente
-        persist_dir = f"vector_db/{os.path.basename(directory)}_{uuid.uuid4().hex[:8]}"
-        os.makedirs(persist_dir, exist_ok=True)
+        # Create persistent vectorstore
+        persist_dir = os.path.join(VECTORSTORE_ROOT, f"{os.path.basename(directory)}_{uuid.uuid4().hex[:8]}")
+        try:
+            os.makedirs(persist_dir, exist_ok=True)
+            vectorstore = Chroma.from_documents(chunks, self.emb, persist_directory=persist_dir)
+        except Exception as e:
+            print(f"[ERROR] Failed to create vectorstore: {e}")
+            # Attempt cleanup
+            try:
+                if os.path.exists(persist_dir):
+                    shutil.rmtree(persist_dir)
+            except Exception:
+                pass
+            return "[ERROR] Failed to create vectorstore"
 
-        vectorstore = Chroma.from_documents(
-            chunks,
-            self.emb,
-            persist_directory=persist_dir
-        )
+        # Register retriever
+        try:
+            retriever = vectorstore.as_retriever(search_kwargs={"k": 15})
+            self.retriever_registry[folder_key] = retriever
+            self.vectorstore_paths[folder_key] = persist_dir
+        except Exception as e:
+            print(f"⚠️ Failed to register retriever: {e}")
+            return "❌ Failed to register retriever"
 
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 15})
-        self.retriever_registry[directory] = retriever
+        return f"✅ Indexed {len(chunks)} chunks from {len(valid_docs)} documents in '{directory}'"
 
-        return f"✅ Indexados {len(chunks)} fragmentos de {len(docs)} documentos en '{directory}'"
+    def remove_directory(self, directory: str) -> str:
+        """Remove a previously indexed folder and delete its vectorstore on disk."""
+        directory = self._normalize_path(directory)
+        folder_key = os.path.abspath(directory)
+        if folder_key in self.retriever_registry:
+            self.retriever_registry.pop(folder_key, None)
+        if folder_key in self.vectorstore_paths:
+            persist_dir = self.vectorstore_paths.pop(folder_key)
+            try:
+                if os.path.exists(persist_dir):
+                    shutil.rmtree(persist_dir)
+            except Exception as e:
+                print(f"⚠️ Failed to remove vectorstore {persist_dir}: {e}")
+        return f"🗑️ Removed folder index: {directory}"
 
     # ------------------------
-    # RAG: Búsqueda (método interno)
+    # RAG query (sync)
     # ------------------------
     def _rag_query(self, query: str, k: int = 5) -> str:
-        """Método interno para buscar en el directorio activo"""
-        # Obtener directorio del contexto (thread_id en producción)
-        active_dir = list(self.retriever_registry.keys())[0] if self.retriever_registry else None
-        
-        if not active_dir:
-            return "❌ No hay directorio indexado. Usa load_and_register_directory() primero."
-        
+        if not self.retriever_registry:
+            return "❌ No indexed folder. Use load_and_register_directory() first."
+
+        # select the most recent vectorstore (or first)
+        active_dir = next(iter(self.retriever_registry.keys()))
         retriever = self.retriever_registry[active_dir]
-        
+
         try:
             docs = retriever.invoke(query)[:k]
-            
             if not docs:
-                return f"❌ No se encontraron documentos relevantes para: '{query}'"
-            
-            # Formatear resultados
+                return f"❌ No relevant documents for: '{query}'"
+
             results = []
             for i, doc in enumerate(docs, 1):
-                fname = doc.metadata.get("file_name", "desconocido")
-                content = doc.page_content[:500]  # Limitar tamaño
-                results.append(f"📄 **Documento {i}** ({fname}):\n{content}\n")
-            
+                fname = doc.metadata.get("file_name", "unknown")
+                content = getattr(doc, "page_content", "")[:500]
+                results.append(f"📄 Doc {i} ({fname}):\n{content}\n")
             return "\n---\n".join(results)
-            
         except Exception as e:
-            return f"❌ Error en búsqueda: {str(e)}"
+            print(f"⚠️ _rag_query error: {e}")
+            return f"❌ Search error: {e}"
 
     # ------------------------
-    # Nodos del grafo
+    # Graph nodes
     # ------------------------
     def worker(self, state: SidekickState) -> dict:
-        """Nodo que procesa la solicitud del usuario"""
-        system_msg = SystemMessage(content=f"""Eres un asistente útil con acceso a herramientas.
-
-**Criterios de éxito:** {state.success_criteria or "Responder de forma clara y precisa"}
-
-**Herramientas disponibles:**
-- search_documents: Busca información en documentos indexados
-
-**Hora actual:** {datetime.now().strftime("%Y-%m-%d %H:%M")}
-
-Usa las herramientas cuando necesites información externa. Sé conciso y directo.
-""")
-        
+        system_msg = SystemMessage(
+            content=(
+                f"You are a helpful assistant with tool access.\n\n"
+                f"**Success criteria:** {state.success_criteria or 'Provide a clear, correct answer.'}\n\n"
+                f"**Available tools:**\n- search_documents: search indexed documents\n\n"
+                f"**Current time:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                "Use tools when you need external information. Be concise."
+            )
+        )
         messages = [system_msg] + state.messages
         response = self.worker_llm_with_tools.invoke(messages)
-        
         return {"messages": [response]}
 
     def should_continue(self, state: SidekickState) -> str:
-        """Decide si llamar tools o ir al evaluator"""
         last_message = state.messages[-1]
-        
-        # Si el mensaje tiene tool_calls, ir a tools
-        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             return "tools"
-        
-        # Si no, evaluar
         return "evaluator"
 
     def evaluator(self, state: SidekickState) -> dict:
-        """Evalúa si se cumplieron los criterios de éxito"""
-        # Construir contexto de conversación
-        conversation = "\n".join([
-            f"{'👤 Usuario' if isinstance(m, HumanMessage) else '🤖 Asistente'}: {getattr(m, 'content', '')}"
-            for m in state.messages[-6:]  # Últimos 6 mensajes
-        ])
-        
+        conversation = "\n".join(
+            [f"{'User' if isinstance(m, HumanMessage) else 'Assistant'}: {getattr(m, 'content', '')}" for m in state.messages[-6:]]
+        )
         last_response = state.messages[-1].content if state.messages else ""
-        
-        eval_prompt = f"""Evalúa la siguiente conversación:
+        eval_prompt = (
+            f"Evaluate the conversation:\n\n{conversation}\n\nLast response:\n{last_response}\n\n"
+            f"Success criteria:\n{state.success_criteria or 'Provide clear and correct answer.'}\n\n"
+            "Answer whether the response meets the criteria, whether more user info is required,"
+            " and provide brief feedback."
+        )
 
-**Conversación:**
-{conversation}
+        eval_result = self.evaluator_llm_with_output.invoke(
+            [SystemMessage(content="You are an objective AI evaluator."), HumanMessage(content=eval_prompt)]
+        )
 
-**Última respuesta del asistente:**
-{last_response}
-
-**Criterios de éxito:**
-{state.success_criteria or "Responder de forma clara y precisa"}
-
-Evalúa si:
-1. La respuesta cumple los criterios
-2. Es necesaria más información del usuario
-3. La respuesta es completa y útil
-"""
-        
-        eval_result = self.evaluator_llm_with_output.invoke([
-            SystemMessage(content="Eres un evaluador objetivo de respuestas de IA."),
-            HumanMessage(content=eval_prompt)
-        ])
-        
-        # Guardar evaluación
         eval_dict = eval_result.model_dump()
         eval_dict["timestamp"] = datetime.now().isoformat()
-        
+
         return {
             "evaluation_history": [eval_dict],
             "criteria_met": eval_result.success_criteria_met,
             "needs_user_input": eval_result.user_input_needed,
-            "messages": [AIMessage(content=f"💭 Evaluación: {eval_result.feedback}")]
+            "messages": [AIMessage(content=f"💭 Evaluation: {eval_result.feedback}")],
         }
 
     def should_end(self, state: SidekickState) -> str:
-        """Decide si terminar o continuar trabajando"""
         if state.criteria_met or state.needs_user_input:
             return "end"
         return "worker"
 
-    # ------------------------
-    # Construcción del grafo
-    # ------------------------
     async def build_graph(self):
-        """Construye el grafo de ejecución"""
         graph_builder = StateGraph(SidekickState)
-        
-        # Nodos
         graph_builder.add_node("worker", self.worker)
         graph_builder.add_node("tools", ToolNode(tools=self.tools))
         graph_builder.add_node("evaluator", self.evaluator)
-        
-        # Edges
         graph_builder.add_edge(START, "worker")
-        
-        graph_builder.add_conditional_edges(
-            "worker",
-            self.should_continue,
-            {"tools": "tools", "evaluator": "evaluator"}
-        )
-        
+        graph_builder.add_conditional_edges("worker", self.should_continue, {"tools": "tools", "evaluator": "evaluator"})
         graph_builder.add_edge("tools", "worker")
-        
-        graph_builder.add_conditional_edges(
-            "evaluator",
-            self.should_end,
-            {"worker": "worker", "end": END}
-        )
-        
+        graph_builder.add_conditional_edges("evaluator", self.should_end, {"worker": "worker", "end": END})
         self.graph = graph_builder.compile(checkpointer=self.memory)
         return self.graph
 
     # ------------------------
-    # Ejecución
+    # Execution helpers
     # ------------------------
     async def run(self, user_input: str, thread_id: Optional[str] = None) -> str:
-        """Ejecuta el sidekick con un input del usuario"""
         if not self.graph:
             await self.setup()
-        
-        thread_id = self.sidekick_id
+        thread_id = thread_id or self.sidekick_id
         config = {"configurable": {"thread_id": thread_id}}
-        
-        initial_state = SidekickState(
-            messages=[HumanMessage(content=user_input)],
-            success_criteria="Responder la pregunta del usuario de forma completa"
-        )
-        
+        initial_state = SidekickState(messages=[HumanMessage(content=user_input)], success_criteria="Answer fully")
         result = await self.graph.ainvoke(initial_state, config)
-        
-        # Retornar última respuesta del asistente
         for msg in reversed(result["messages"]):
             if isinstance(msg, AIMessage) and not msg.content.startswith("💭"):
                 return msg.content
-        
-        return "No se generó respuesta"
+        return "No response generated"
 
     def cleanup(self):
-        """Limpia recursos"""
+        # Safely remove all vectorstores on cleanup
+        for path in list(self.vectorstore_paths.values()):
+            try:
+                if os.path.exists(path):
+                    shutil.rmtree(path)
+            except Exception as e:
+                print(f"⚠️ cleanup remove failed {path}: {e}")
         self.retriever_registry.clear()
-        print("🧹 Recursos limpiados")
+        self.vectorstore_paths.clear()
+        print("🧹 Resources cleaned")
 
 
+async def init_sidekick() -> Sidekick:
+    sidekick = Sidekick()
+    await sidekick.setup()
+    return sidekick

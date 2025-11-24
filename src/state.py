@@ -8,7 +8,6 @@ class SidekickState(BaseModel):
 
     messages: Annotated[List[Any], add_messages] = Field(default_factory=list)
 
-    # REQUIRED FOR LANGGRAPH CHECKPOINTER
     thread_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
     session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -25,8 +24,13 @@ class SidekickState(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
+
+# ------------------------
+# Schemas estructurados
+# ------------------------
 class EvaluatorOutput(BaseModel):
-    feedback: str
-    success_criteria_met: bool
-    user_input_needed: bool
-    confidence: float
+    feedback: str = Field(description="Retroalimentación sobre la respuesta")
+    success_criteria_met: bool = Field(description="Si se cumplieron los criterios")
+    user_input_needed: bool = Field(description="Si se necesita más input del usuario")
+    confidence: float = Field(description="Confianza en la evaluación (0-1)", ge=0, le=1)
+
