@@ -1,4 +1,4 @@
-from src.db import get_conn
+from src.db.db import get_conn
 import hashlib
 
 # -------------------- Utilities --------------------
