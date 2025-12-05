@@ -1,6 +1,5 @@
 """
-Construcción del grafo LangGraph.
-Define los nodos y edges del flujo de conversación.
+Construction of LangGraph Graph.
 """
 from datetime import datetime
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -11,7 +10,7 @@ from src.core.state import SidekickState
 
 
 class GraphBuilder:
-    """Constructor del grafo LangGraph para Sidekick."""
+    """Constructor of the Graph"""
 
     def __init__(self, worker_llm, evaluator_llm, tools, memory):
         self.worker_llm = worker_llm
@@ -19,10 +18,10 @@ class GraphBuilder:
         self.tools = tools
         self.memory = memory
 
-    # -------------------- Nodos --------------------
+    # -------------------- Nodes --------------------
 
     def worker_node(self, state: SidekickState) -> dict:
-        """Nodo trabajador que procesa consultas del usuario."""
+        """Worker node """
         system_msg = SystemMessage(
             content=(
                 f"You are a helpful assistant with tool access.\n\n"
@@ -37,7 +36,7 @@ class GraphBuilder:
         return {"messages": [response]}
 
     def evaluator_node(self, state: SidekickState) -> dict:
-        """Nodo evaluador que verifica si se cumplieron los criterios."""
+        """Evaluator node"""
         # Construir contexto de conversación
         conversation = "\n".join([
             f"{'User' if isinstance(m, HumanMessage) else 'Assistant'}: {getattr(m, 'content', '')}"
@@ -72,14 +71,14 @@ class GraphBuilder:
     # -------------------- Edge conditions --------------------
 
     def should_continue(self, state: SidekickState) -> str:
-        """Determina si debe ir a herramientas o evaluador."""
+        """Detetermine if use tools or go to evaluator."""
         last_message = state.messages[-1]
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             return "tools"
         return "evaluator"
 
     def should_end(self, state: SidekickState) -> str:
-        """Determina si debe terminar o continuar iterando."""
+        """Determine if needs to end or iterate."""
         if state.criteria_met or state.needs_user_input:
             return "end"
         return "worker"
@@ -87,7 +86,7 @@ class GraphBuilder:
     # -------------------- Construcción --------------------
 
     async def build(self):
-        """Construye y compila el grafo."""
+        """Build and compile graph."""
         graph_builder = StateGraph(SidekickState)
         
         # Agregar nodos

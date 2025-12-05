@@ -1,12 +1,12 @@
 """
-Utilidades para manejo de paths y validaciones.
+Utilities for paths handle
 """
 import os
 from typing import Optional, List
 
 
 def normalize_path(path: str) -> str:
-    """Normaliza un path de manera segura."""
+    """Normalize a path in a safe way."""
     try:
         return os.path.normpath(path) if path else ""
     except Exception:
@@ -14,7 +14,7 @@ def normalize_path(path: str) -> str:
 
 
 def is_excluded_path(path: str, excluded_dirs: Optional[List[str]] = None) -> bool:
-    """Verifica si un path debe ser excluido."""
+    """Verify if a path must be excluded."""
     if not path:
         return True
     
@@ -25,7 +25,7 @@ def is_excluded_path(path: str, excluded_dirs: Optional[List[str]] = None) -> bo
 
 
 def validate_directory(directory: str) -> bool:
-    """Valida que un directorio existe y es accesible."""
+    """Validate if a directory exists and is accessible."""
     if not directory:
         return False
     
@@ -34,7 +34,7 @@ def validate_directory(directory: str) -> bool:
 
 
 def get_absolute_path(path: str) -> str:
-    """Obtiene el path absoluto de manera segura."""
+    """Get the absolute path in a safe way."""
     try:
         return os.path.abspath(normalize_path(path))
     except Exception:

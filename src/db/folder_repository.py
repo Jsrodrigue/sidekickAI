@@ -1,16 +1,16 @@
 """
-Repositorio para gestionar carpetas en la base de datos.
+Repositories for manage the folders
 """
 from typing import List, Tuple
 from src.db.db import get_conn
 
 
 class FolderRepository:
-    """Repositorio para operaciones CRUD de carpetas."""
+    """Repository for folders CRUD ."""
 
     @staticmethod
     def add(username: str, folder_path: str) -> Tuple[bool, str, List[str]]:
-        """Añade una carpeta para un usuario."""
+        """Add a folder for an user."""
         if not username or not folder_path:
             return False, "Username and folder path required", []
         
@@ -31,7 +31,7 @@ class FolderRepository:
 
     @staticmethod
     def remove(username: str, folder_path: str) -> Tuple[bool, str, List[str]]:
-        """Elimina una carpeta de un usuario."""
+        """Delete a folder for an user."""
         if not username or not folder_path:
             return False, "Username and folder path required", []
         
@@ -52,7 +52,7 @@ class FolderRepository:
 
     @staticmethod
     def get_all(username: str) -> List[str]:
-        """Obtiene todas las carpetas de un usuario."""
+        """Get all the folders of aun user."""
         if not username:
             return []
         
@@ -73,7 +73,7 @@ class FolderRepository:
 
     @staticmethod
     def exists(username: str, folder_path: str) -> bool:
-        """Verifica si una carpeta existe para un usuario."""
+        """Check if a folder exists for an user."""
         if not username or not folder_path:
             return False
         

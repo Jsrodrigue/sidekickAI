@@ -13,3 +13,7 @@ wheels/
 # Index and db
 vector_db/
 database.db
+
+# Example 
+knowledge_base/
+sandbox/
