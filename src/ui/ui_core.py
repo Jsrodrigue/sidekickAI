@@ -2,185 +2,68 @@
 Gradio app - Sidekick AI
 """
 
-import asyncio
 from typing import Optional
+from pathlib import Path
 
 import gradio as gr
 
 from src.ui.auth import login_user, register_user
-from src.core.sidekick import init_sidekick
-from src.ui.ui_handlers import UIHandlers
-from src.services.session_service import SessionService
-from src.services.folder_service import FolderService
-from src.services.sidekick_service import SidekickService
-from src.db.session_repository import SessionRepository
-
-# -------------------- Globals --------------------
-
-sidekick: Optional[object] = None
-handlers: Optional[UIHandlers] = None
-_init_lock = asyncio.Lock()
-
-
-# -------------------- Initialization --------------------
-
-async def ensure_initialized() -> UIHandlers:
-    """Ensure that Sidekick and UIHandlers are initialized exactly once."""
-    global sidekick, handlers
-
-    # Fast path: already initialized
-    if sidekick is not None and handlers is not None:
-        return handlers
-
-    # Slow path: initialize with a lock
-    async with _init_lock:
-        if sidekick is None:
-            sidekick = await init_sidekick()
-
-        if handlers is None:
-            # Create services
-            session_repo = SessionRepository()
-            session_service = SessionService(session_repo)
-            folder_service = FolderService(sidekick)
-            sidekick_service = SidekickService(sidekick)
-
-            # Wire them into a single UIHandlers instance
-            handlers = UIHandlers(
-                session_service=session_service,
-                folder_service=folder_service,
-                sidekick_service=sidekick_service,
-            )
-
-    return handlers
+from src.ui.gradio_wrappers import (
+    MAX_RETRIEVAL_K,
+    wrapped_get_folders,
+    wrapped_add_folder,
+    wrapped_remove_folder,
+    wrapped_index_folder,
+    wrapped_reindex_folder,
+    wrapped_chat,
+    wrapped_load_chat,
+    wrapped_clear_chat,
+    format_active_folder_label,
+)
 
 
-# -------------------- Wrappers (for Gradio) --------------------
-
-async def wrapped_get_folders(username: Optional[str]):
-    if not username:
-        return []
-    h = await ensure_initialized()
-    return h.get_folders(username)
-
-
-async def wrapped_add_folder(username: Optional[str], folder: str):
-    if not username:
-        return "Not logged in", gr.update()
-    h = await ensure_initialized()
-    msg, folders = await h.add_folder(username, folder)
-    # Return status label + updated dropdown choices
-    return msg, gr.update(choices=folders, value=folder)
-
-
-async def wrapped_remove_folder(username: Optional[str], folder: Optional[str]):
-    if not username or not folder:
-        return "Not logged in", gr.update(choices=[], value=None)
-    h = await ensure_initialized()
-    msg, folders = await h.remove_folder(username, folder)
-    return msg, gr.update(
-        choices=folders,
-        value=folders[0] if folders else None,
-    )
-
-
-async def wrapped_index_folder(username: Optional[str], folder: Optional[str]):
-    if not username or not folder:
-        return "Not logged in"
-    h = await ensure_initialized()
-    # Returns a simple status string
-    return await h.index_folder(username, folder)
-
-
-async def wrapped_reindex_folder(username: Optional[str], folder: Optional[str]):
-    if not username or not folder:
-        return "Not logged in"
-    h = await ensure_initialized()
-    # Returns a simple status string
-    return await h.reindex_folder(username, folder)
-
-
-async def wrapped_chat(username: Optional[str], folder: Optional[str], message: str):
+def create_ui(css_path: str | None = None):
     """
-    Wrapper for chat: returns messages in Gradio type="messages" format
-    plus an empty string to clear the textbox.
+    Create the full Gradio interface with optional CSS (loaded only if file exists).
     """
-    if not username or not folder:
-        # Mensaje de aviso si alguien consigue mandar sin estar bien logueado
-        return (
-            [
-                {
-                    "role": "assistant",
-                    "content": "Please log in and select a folder before chatting.",
-                }
-            ],
-            "",
-        )
-    h = await ensure_initialized()
-    history, _ = await h.chat(username, folder, message)
-    # 1st -> Chatbot (list of {role, content}), 2nd -> textbox (cleared)
-    return history, ""
 
+    css = ""
 
-async def wrapped_load_chat(username: Optional[str], folder: Optional[str]):
-    """
-    Load existing chat history for (username, folder).
-    """
-    if not username or not folder:
-        return []
-    h = await ensure_initialized()
-    history = await h.load_chat(username, folder)
-    return history
+    # Load CSS if a path is explicitly provided
+    if css_path:
+        css_file = Path(css_path)
+        if css_file.exists():
+            css = css_file.read_text()
+        else:
+            print(f"[Warning] CSS file not found: {css_path}. Running without custom styles.")
 
-
-async def wrapped_clear_chat(username: Optional[str], folder: Optional[str]):
-    """
-    Clears the server-side session messages for this (username, folder)
-    and returns an empty list for the Chatbot.
-    """
-    if not username or not folder:
-        return []
-    h = await ensure_initialized()
-    messages = h.clear_chat(username, folder)
-    # Chatbot(type="messages") expects a list of messages (dicts), so [] is valid
-    return messages
-
-
-def format_active_folder_label(folder: Optional[str]) -> str:
-    """Helper to format the 'active folder' label."""
-    if folder:
-        return f"**Active folder for chat:** `{folder}`"
-    return "**Active folder for chat:** _none selected_"
-
-
-# -------------------- UI --------------------
-
-def create_ui():
-    """Create the full Gradio interface."""
-
-    with gr.Blocks(theme=gr.themes.Soft()) as demo:
-        # Estado de sesión (None = no logueado)
+    with gr.Blocks(css=css) as demo:
+        # Session state (None = not logged in)
         logged_in_user = gr.State(value=None)
 
-        gr.Markdown("# 📚 Sidekick AI - Multi-User RAG Assistant")
+        gr.Markdown("# Sidekick AI")
         gr.Markdown(
-            "Log in, register some document folders, and chat with your own knowledge base.\n\n"
-            "**Workflow:** 1) Add & index a folder → 2) Pick it as active → 3) Ask questions in chat."
+            "Register your document folders, and chat with your own knowledge base.\n\n"
         )
 
         # ---------- Login Page ----------
-        with gr.Column(visible=True) as login_page:
-            gr.Markdown("## 🔐 Login / Register")
+        with gr.Column(visible=True, elem_id="login_container") as login_page:
+            gr.Markdown("## Login / Register")
 
             username_input = gr.Textbox(
                 label="Username",
                 placeholder="Enter username",
             )
+
             password_input = gr.Textbox(
                 label="Password",
                 type="password",
                 placeholder="Enter password",
             )
-            login_status = gr.Label(label="Status")
+
+            login_status = gr.Label(
+                label="Status",
+            )
 
             with gr.Row():
                 login_btn = gr.Button("🔓 Login", variant="primary")
@@ -188,9 +71,8 @@ def create_ui():
 
         # ---------- Main Page ----------
         with gr.Column(visible=False) as main_page:
-            # Barra superior con logout
+            # Top bar with logout
             with gr.Row():
-                gr.Markdown("## 👋 Welcome to Sidekick")
                 logout_btn = gr.Button("🚪 Logout", variant="secondary")
 
             with gr.Row():
@@ -209,6 +91,24 @@ def create_ui():
                         )
 
                     folder_status = gr.Label(label="Folder Status")
+
+                    # ---- Indexing parameters (collapsible) ----
+                    with gr.Accordion("Indexing parameters (advanced)", open=False):
+                        chunk_size_slider = gr.Slider(
+                            minimum=128,
+                            maximum=2048,
+                            value=600,
+                            step=64,
+                            label="Chunk size",
+                        )
+
+                        chunk_overlap_slider = gr.Slider(
+                            minimum=0,
+                            maximum=512,
+                            value=20,
+                            step=10,
+                            label="Chunk overlap",
+                        )
 
                     gr.Markdown("#### Indexed folders")
 
@@ -230,11 +130,19 @@ def create_ui():
                         remove_folder_btn = gr.Button(
                             "🗑️ Remove Folder", variant="secondary"
                         )
-                        # Eliminado el botón de "Set as Active" porque ya se hace con el dropdown
+                        # "Set as Active" not needed: the dropdown itself chooses the active folder
 
                 # ----- RIGHT: Chat -----
                 with gr.Column(scale=2):
                     gr.Markdown("### 2️⃣ Chat with your documents")
+
+                    # RAG retrieval settings (collapsible)
+                    with gr.Accordion("RAG retrieval settings", open=False):
+                        retrieval_k_dropdown = gr.Dropdown(
+                            choices=list(range(1, MAX_RETRIEVAL_K + 1)),
+                            value=5,
+                            label="Top-k documents per query",
+                        )
 
                     chatbox = gr.Chatbot(
                         type="messages",
@@ -295,9 +203,9 @@ def create_ui():
                 msg,
                 gr.update(visible=True),
                 gr.update(visible=False),
-                gr.update(),                    # folder_dropdown sin cambios
+                gr.update(),                    # folder_dropdown unchanged
                 None,                           # logged_in_user
-                [],                             # chatbox vacío
+                [],                             # empty chatbox
                 format_active_folder_label(None),
             )
 
@@ -334,14 +242,24 @@ def create_ui():
         # Index selected folder (if not already indexed)
         index_folder_btn.click(
             wrapped_index_folder,
-            inputs=[logged_in_user, folder_dropdown],
+            inputs=[
+                logged_in_user,
+                folder_dropdown,
+                chunk_size_slider,
+                chunk_overlap_slider,
+            ],
             outputs=folder_status,
         )
 
         # Force reindex selected folder
         reindex_folder_btn.click(
             wrapped_reindex_folder,
-            inputs=[logged_in_user, folder_dropdown],
+            inputs=[
+                logged_in_user,
+                folder_dropdown,
+                chunk_size_slider,
+                chunk_overlap_slider,
+            ],
             outputs=folder_status,
         )
 
@@ -364,14 +282,24 @@ def create_ui():
         # Chat send button
         send_btn.click(
             wrapped_chat,
-            inputs=[logged_in_user, folder_dropdown, message_input],
+            inputs=[
+                logged_in_user,
+                folder_dropdown,
+                message_input,
+                retrieval_k_dropdown,
+            ],
             outputs=[chatbox, message_input],
         )
 
         # Pressing Enter in the textbox also sends
         message_input.submit(
             wrapped_chat,
-            inputs=[logged_in_user, folder_dropdown, message_input],
+            inputs=[
+                logged_in_user,
+                folder_dropdown,
+                message_input,
+                retrieval_k_dropdown,
+            ],
             outputs=[chatbox, message_input],
         )
 
@@ -385,17 +313,19 @@ def create_ui():
         # ----- Logout event -----
 
         def handle_logout():
-            # Limpiar campos básicos, estado y volver a la pantalla de login
+            """
+            Reset fields, state, and go back to the login screen.
+            """
             return (
                 "",   # username_input
                 "",   # password_input
                 "Logged out",  # login_status
                 gr.update(visible=True),    # login_page visible
-                gr.update(visible=False),   # main_page oculto
-                [],                         # chatbox vacío
-                gr.update(choices=[], value=None),  # folder_dropdown vacío
-                format_active_folder_label(None),   # etiqueta de carpeta activa
-                None,  # logged_in_user (State) = sesión cerrada
+                gr.update(visible=False),   # main_page hidden
+                [],                         # empty chatbox
+                gr.update(choices=[], value=None),  # empty folder_dropdown
+                format_active_folder_label(None),   # active folder label
+                None,  # logged_in_user (State) = logged out
             )
 
         logout_btn.click(
@@ -415,8 +345,3 @@ def create_ui():
         )
 
     return demo
-
-
-if __name__ == "__main__":
-    demo = create_ui()
-    demo.queue().launch()

@@ -39,10 +39,19 @@ class UIHandlers:
 
     # -------------------- Chat (per user & folder) --------------------
 
-    async def chat(self, username: str, folder: str, prompt: str):
+    async def chat(
+        self,
+        username: str,
+        folder: str,
+        prompt: str,
+        top_k: int,
+    ):
         """
         Chat for a specific (username, folder) pair.
         Keeps separate, persistent histories per folder.
+
+        top_k controls how many documents RAG will retrieve per query and
+        is forwarded to SidekickService / Sidekick.
         """
         try:
             if not folder:
@@ -52,8 +61,13 @@ class UIHandlers:
             state = self.session_service.load(username, folder)
 
             # 2) Send message to Sidekick (thread_id uses username + folder)
+            #    SidekickService.send_message is expected to support `top_k`.
             new_state = await self.sidekick_service.send_message(
-                prompt, state, username, folder
+                prompt=prompt,
+                state=state,
+                username=username,
+                folder=folder,
+                top_k=top_k,
             )
 
             # 3) Save updated state for THIS (username, folder)
@@ -145,7 +159,7 @@ class UIHandlers:
 
             if folder not in state.indexed_directories:
                 state.indexed_directories.append(folder)
-                # Ensure the folder is indexed
+                # Ensure the folder is indexed (with default chunk params inside FolderService)
                 new_state = await self.folder_service.ensure_indexed(folder, state)
                 # Save GLOBAL state
                 self.session_service.save(username, _GLOBAL_FOLDER_KEY, new_state)
@@ -174,26 +188,53 @@ class UIHandlers:
         except Exception as e:
             return f"Error: {e}"
 
-    async def index_folder(self, username: str, folder: str):
+    async def index_folder(
+        self,
+        username: str,
+        folder: str,
+        chunk_size: int,
+        chunk_overlap: int,
+    ):
         """
         Index the contents of a specific folder.
+
         This is a GLOBAL per-user operation, not tied to chat history.
+        chunk_size and chunk_overlap control how documents are split.
         """
         try:
             state = self.session_service.load(username, _GLOBAL_FOLDER_KEY)
-            new_state = await self.folder_service.ensure_indexed(folder, state)
+            # FolderService.ensure_indexed is expected to accept chunk params now
+            new_state = await self.folder_service.ensure_indexed(
+                folder=folder,
+                state=state,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            )
             self.session_service.save(username, _GLOBAL_FOLDER_KEY, new_state)
             return "Folder indexed"
         except Exception as e:
             return f"Error: {e}"
 
-    async def reindex_folder(self, username: str, folder: str):
+    async def reindex_folder(
+        self,
+        username: str,
+        folder: str,
+        chunk_size: int,
+        chunk_overlap: int,
+    ):
         """
-        Force reindexing of the selected folder.
+        Force reindexing of the selected folder,
+        using the provided chunk_size and chunk_overlap.
         """
         try:
             state = self.session_service.load(username, _GLOBAL_FOLDER_KEY)
-            new_state = await self.folder_service.reindex_folder(folder, state)
+            # FolderService.reindex_folder is expected to accept chunk params now
+            new_state = await self.folder_service.reindex_folder(
+                folder=folder,
+                state=state,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            )
             self.session_service.save(username, _GLOBAL_FOLDER_KEY, new_state)
             return "Folder reindexed"
         except Exception as e:

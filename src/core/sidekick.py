@@ -29,7 +29,7 @@ load_dotenv(override=True)
 
 VECTORSTORE_ROOT = os.environ.get("VECTORSTORE_ROOT", "vector_db")
 INDEX_MANIFEST = os.path.join(VECTORSTORE_ROOT, "index_manifest.json")
-
+SEARCH_K=15
 
 class Sidekick:
     """
@@ -118,7 +118,7 @@ class Sidekick:
                     print(f"[WARN] Could not load vectorstore at {persist_dir}")
                     continue
 
-                retriever = vectorstore.as_retriever(search_kwargs={"k": 15})
+                retriever = vectorstore.as_retriever(search_kwargs={"k": SEARCH_K})
                 self.retrieval_service.register_retriever(
                     folder_key, retriever, persist_dir
                 )
@@ -131,7 +131,7 @@ class Sidekick:
     async def setup(self):
         """Initializes tools and builds the LangGraph pipeline."""
 
-        # 1) Build all tools (RAG + files + web + python + wiki)
+        # 1) Build all tools (RAG + files + web + etc.)
         self.tools = build_all_tools(self.retrieval_service)
 
         # 2) Bind tools and structured outputs
@@ -151,10 +151,19 @@ class Sidekick:
 
     # -------------------- Indexing Operations --------------------
 
-    def index_directory(self, directory: str, force_reindex: bool = False) -> str:
+    def index_directory(
+        self,
+        directory: str,
+        force_reindex: bool = False,
+        chunk_size: int = 600,
+        chunk_overlap: int = 20,
+    ) -> str:
         """
         Synchronously indexes a directory.
         Should be executed inside asyncio.to_thread to avoid blocking.
+
+        chunk_size and chunk_overlap control how documents are split
+        during indexing.
         """
         directory = normalize_path(directory)
 
@@ -183,7 +192,11 @@ class Sidekick:
 
         # Chunk into embeddings
         try:
-            chunks = self.indexing_service.chunk_documents(valid_docs)
+            chunks = self.indexing_service.chunk_documents(
+                valid_docs,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            )
         except Exception as e:
             return f"[ERROR] Error during chunk splitting: {e}"
 
@@ -197,7 +210,7 @@ class Sidekick:
 
         # Register retriever and update manifest
         try:
-            retriever = vectorstore.as_retriever(search_kwargs={"k": 15})
+            retriever = vectorstore.as_retriever(search_kwargs={"k": SEARCH_K})
             self.retrieval_service.register_retriever(
                 folder_key, retriever, persist_dir
             )
@@ -236,8 +249,14 @@ class Sidekick:
         user_input: str,
         thread_id: Optional[str] = None,
         folder: Optional[str] = None,
+        top_k: Optional[int] = None,
     ) -> str:
-        """Runs a user query through the LangGraph pipeline (with debug)."""
+        """
+        Runs a user query through the LangGraph pipeline (with debug).
+
+        top_k (if provided) sets the default number of documents to retrieve
+        for RAG via retrieval_service.default_k.
+        """
 
         if not self.graph:
             await self.setup()
@@ -257,6 +276,11 @@ class Sidekick:
         else:
             self.retrieval_service.set_current_folder(None)
             print(">>> Active RAG folder set to: NONE")
+
+        # Apply retrieval top_k if provided
+        if top_k is not None and top_k > 0:
+            print(f">>> Setting retrieval default_k to: {top_k}")
+            self.retrieval_service.default_k = top_k
 
         # DEBUG: what retriever is being used?
         active_retriever = self.retrieval_service.get_retriever(

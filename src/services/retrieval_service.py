@@ -15,6 +15,9 @@ class RetrievalService:
         self.vectorstore_paths: Dict[str, str] = {}
         # Currently active folder (set from Sidekick.run based on UI selection)
         self.current_folder: Optional[str] = None
+        # Default number of retrive documents
+        self.default_k: int = 5
+
 
     def register_retriever(self, folder_path: str, retriever: Any, persist_dir: str):
         """Register a retriever for a folder."""

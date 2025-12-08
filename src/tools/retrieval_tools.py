@@ -1,42 +1,67 @@
+
 from langchain_core.tools import tool
 
 
 def build_retrieval_tools(retrieval_service):
     """
-    Factory function that creates and returns all retrieval-related tools.
+    Factory that builds all tools related to RAG (Retrieval-Augmented Generation).
 
-    This pattern allows the tools to use the retrieval_service dependency
-    without tightly coupling them to the Sidekick class.
+    This exposes a single search tool that the LLM can call whenever it needs
+    to retrieve information from the user's indexed folders.
     """
 
     @tool
-    def search_documents(query: str, k: int = 5) -> str:
+    def search_documents(query: str, k: int = 0) -> str:
         """
-        Search for relevant text chunks in the currently active folder.
-        
-        ALWAYS use this tool when:
-        - The user asks a question that may relate to their documents.
-        - You need context or factual information from indexed files.
-        Parameters
-        ----------
+         Search through the user's indexed documents using the RAG system.
+
+        This tool retrieves the most relevant text chunks from the user's
+        knowledge base based on semantic search.
+
+        -------------------------
+        🔧 PARAMETERS
+        -------------------------
         query : str
-            Natural-language user query to search for.
-        k : int, optional (default=5)
-            Maximum number of top-ranked chunks to return.
+            The natural language question or text to search for.
+        k : int (optional)
+            Number of chunks to retrieve.
+            - If k == 0 → the system automatically uses `retrieval_service.default_k`.
+            - If default_k is not set → uses a fixed fallback of 5.
 
-        Behavior
-        --------
-        - Searches *only* within the currently selected folder.
-        - The active folder is set by Sidekick.run() or the UI.
-        - Returns concatenated retrieved content in a readable form.
-        - If no folder is active or no retriever is available,
-          a friendly error message is returned.
+        -------------------------
+         LLM BEHAVIOR GUIDANCE
+        -------------------------
+        ALWAYS call this tool when:
+        - You need factual information from the user's documents.
+        - The user asks anything requiring context from indexed folders.
+        - You need to reference or quote content from stored files.
+        - You need grounding before answering questions.
 
-        Returns
-        -------
-        str
-            The retrieved text results or an explanatory message.
+        DO NOT hallucinate; if the answer depends on document content,
+        call this tool first.
+
+        -------------------------
+         RETURNS
+        -------------------------
+        A formatted string containing the retrieved chunks, each with:
+        - Document number
+        - File name
+        - First 500 characters of content
+
+        If no retrievers exist, returns an instructive message.
         """
-        return retrieval_service.search(query=query, k=k)
+
+        # No folders indexed → give the LLM a clear instruction
+        if not retrieval_service.retriever_registry:
+            return (
+                "❌ No indexed knowledge base available.\n"
+                "Please index a folder before attempting document search."
+            )
+
+        # Determine number of results to fetch
+        effective_k = k or getattr(retrieval_service, "default_k", 5)
+
+        # Perform the search
+        return retrieval_service.search(query=query, k=effective_k)
 
     return [search_documents]

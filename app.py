@@ -8,7 +8,7 @@ init_db()
 
 
 if __name__ == "__main__":
-    demo = create_ui()
+    demo = create_ui(css_path="static/style.css")
     demo.launch(
         server_name="0.0.0.0",
         server_port=7860,
