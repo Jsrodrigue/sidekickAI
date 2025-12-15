@@ -11,12 +11,12 @@ from typing import Optional
 
 import gradio as gr
 
-from src.core.sidekick import init_sidekick, SEARCH_K
-from src.ui.ui_handlers import UIHandlers
-from src.services.session_service import SessionService
-from src.services.folder_service import FolderService
-from src.services.sidekick_service import SidekickService
+from src.core.sidekick import SEARCH_K, init_sidekick
 from src.db.session_repository import SessionRepository
+from src.services.folder_service import FolderService
+from src.services.session_service import SessionService
+from src.services.sidekick_service import SidekickService
+from src.ui.ui_handlers import UIHandlers
 
 # -------------------- Globals --------------------
 
@@ -29,6 +29,7 @@ MAX_RETRIEVAL_K = SEARCH_K
 
 
 # -------------------- Initialization --------------------
+
 
 async def ensure_initialized() -> UIHandlers:
     """
@@ -66,6 +67,7 @@ async def ensure_initialized() -> UIHandlers:
 
 # -------------------- Helpers --------------------
 
+
 def format_active_folder_label(folder: Optional[str]) -> str:
     """Helper to format the 'active folder' label."""
     if folder:
@@ -74,6 +76,7 @@ def format_active_folder_label(folder: Optional[str]) -> str:
 
 
 # -------------------- Wrappers (for Gradio) --------------------
+
 
 async def wrapped_get_folders(username: Optional[str]):
     """Return the list of folders for the given user or [] if not logged in."""
@@ -95,7 +98,6 @@ async def wrapped_add_folder(username: Optional[str], folder: str):
         return "Not logged in", gr.update()
     h = await ensure_initialized()
     msg, folders = await h.add_folder(username, folder)
-    # Return status label + updated dropdown choices
     return msg, gr.update(choices=folders, value=folder)
 
 
@@ -156,50 +158,47 @@ async def wrapped_chat(
     folder: Optional[str],
     message: str,
     top_k: int,
+    enabled_tools: list[str] | None = None,
 ):
     """
     Chat wrapper: returns messages in Gradio type="messages" format
     plus an empty string to clear the textbox.
 
     top_k controls how many documents RAG will retrieve.
+    enabled_tools is a list of tool names/groups enabled in the UI.
+
+    If folder is None, chat runs WITHOUT RAG (no active folder).
     """
-    if not username or not folder:
-        # Warning message if someone somehow sends without being logged in
+    if not username:
         return (
-            [
-                {
-                    "role": "assistant",
-                    "content": "Please log in and select a folder before chatting.",
-                }
-            ],
+            [{"role": "assistant", "content": "Please log in before chatting."}],
             "",
         )
+
+    enabled_tools = enabled_tools or []
+
     h = await ensure_initialized()
-    # UIHandlers.chat is expected to accept (username, folder, message, top_k)
-    history, _ = await h.chat(username, folder, message, top_k)
-    # 1st -> Chatbot (list of {role, content}), 2nd -> textbox (cleared)
+    history, _ = await h.chat(username, folder, message, top_k, enabled_tools)
     return history, ""
 
 
 async def wrapped_load_chat(username: Optional[str], folder: Optional[str]):
     """
-    Load existing chat history for (username, folder).
+    Load existing chat history for (username, folder) or for the
+    'no folder' chat if folder is None.
     """
-    if not username or not folder:
+    if not username:
         return []
     h = await ensure_initialized()
-    history = await h.load_chat(username, folder)
-    return history
+    return await h.load_chat(username, folder)
 
 
 async def wrapped_clear_chat(username: Optional[str], folder: Optional[str]):
     """
     Clear the server-side session messages for this (username, folder)
-    and return an empty list for the Chatbot.
+    or for the 'no folder' chat if folder is None.
     """
-    if not username or not folder:
+    if not username:
         return []
     h = await ensure_initialized()
-    messages = h.clear_chat(username, folder)
-    # Chatbot(type="messages") expects a list of messages (dicts), so [] is valid
-    return messages
+    return h.clear_chat(username, folder)

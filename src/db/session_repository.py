@@ -52,7 +52,6 @@ class SessionRepository:
                 "success_criteria": getattr(state, "success_criteria", None),
                 "criteria_met": getattr(state, "criteria_met", False),
                 "needs_user_input": getattr(state, "needs_user_input", False),
-                "evaluation_history": getattr(state, "evaluation_history", []),
                 "task_metadata": getattr(state, "task_metadata", {}),
             }
 
@@ -114,7 +113,6 @@ class SessionRepository:
                 success_criteria=data.get("success_criteria"),
                 criteria_met=data.get("criteria_met", False),
                 needs_user_input=data.get("needs_user_input", False),
-                evaluation_history=data.get("evaluation_history") or [],
                 task_metadata=data.get("task_metadata") or {},
             )
 

@@ -9,13 +9,12 @@ import uuid
 from typing import Optional
 
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, BaseMessage
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langgraph.checkpoint.memory import MemorySaver
 
 from src.core.graph import GraphBuilder
 from src.core.state import SidekickState
-from src.models.output_models import EvaluatorOutput
 from src.services.indexing_service import IndexingService
 from src.services.retrieval_service import RetrievalService
 from src.tools import build_all_tools
@@ -51,21 +50,19 @@ class Sidekick:
             openai_api_key=api_key,
             temperature=0,
         )
-        self.evaluator_llm = ChatOpenAI(
-            model="gpt-4o-mini",
-            openai_api_key=api_key,
-            temperature=0,
-        )
-
+      
         # Services
         embeddings = OpenAIEmbeddings(openai_api_key=api_key)
         self.indexing_service = IndexingService(embeddings, VECTORSTORE_ROOT)
         self.retrieval_service = RetrievalService()
-
         # Memory and graph
         self.memory = MemorySaver()
         self.graph = None
-        self.tools = []
+
+        # Tools
+        self.all_tools = []   # all available tools (built once)
+        self.tools = []       # tools currently active in the graph
+
 
         # Restore previously indexed folders (Chroma) from disk
         self._bootstrap_retrievers_from_manifest()
@@ -128,26 +125,33 @@ class Sidekick:
 
     # -------------------- Setup (LangGraph + Tools) --------------------
 
+    async def _build_graph_with_tools(self, tools):
+        """
+        (Re)build the LangGraph pipeline using the given tools list.
+        This allows us to customize which tools are enabled per run.
+        """
+        # Bind tools
+        worker_llm_with_tools = self.worker_llm.bind_tools(tools)
+       
+
+        graph_builder = GraphBuilder(
+            worker_llm=worker_llm_with_tools,
+            tools=tools,
+            memory=self.memory,
+        )
+        self.graph = await graph_builder.build()
+        self.tools = tools
+
+
     async def setup(self):
         """Initializes tools and builds the LangGraph pipeline."""
 
         # 1) Build all tools (RAG + files + web + etc.)
-        self.tools = build_all_tools(self.retrieval_service)
+        self.all_tools = build_all_tools(self.retrieval_service)
 
-        # 2) Bind tools and structured outputs
-        self.worker_llm_with_tools = self.worker_llm.bind_tools(self.tools)
-        self.evaluator_llm_with_output = self.evaluator_llm.with_structured_output(
-            EvaluatorOutput
-        )
+        # 2) Initially enable all tools
+        await self._build_graph_with_tools(self.all_tools)
 
-        # 3) Build LangGraph
-        graph_builder = GraphBuilder(
-            worker_llm=self.worker_llm_with_tools,
-            evaluator_llm=self.evaluator_llm_with_output,
-            tools=self.tools,
-            memory=self.memory,
-        )
-        self.graph = await graph_builder.build()
 
     # -------------------- Indexing Operations --------------------
 
@@ -247,35 +251,79 @@ class Sidekick:
     async def run(
         self,
         user_input: str,
-        thread_id: Optional[str] = None,
         folder: Optional[str] = None,
         top_k: Optional[int] = None,
+        enabled_tools: Optional[list[str]] = None,
+        history: Optional[list[BaseMessage]] = None,
     ) -> str:
         """
         Runs a user query through the LangGraph pipeline (with debug).
 
         top_k (if provided) sets the default number of documents to retrieve
         for RAG via retrieval_service.default_k.
+
+        enabled_tools is a list of *tool groups* enabled in the UI
+        (e.g. ["rag", "web_search"]).
+        - If enabled_tools is None: all tools are enabled (no UI control).
+        - If enabled_tools is a list: only groups in that list are enabled.
+
+        history is an optional list of LangChain messages (HumanMessage / AIMessage)
+        representing the recent chat history to give the graph conversational context.
         """
 
-        if not self.graph:
+        # Ensure initial setup is done
+        if not self.graph or not getattr(self, "all_tools", None):
             await self.setup()
 
         # -------------------------
-        # DEBUG: FOLDER SELECTION
+        # Select tools for this run
+        # -------------------------
+        if enabled_tools is None:
+            # No restriction (e.g. called without UI) -> all tools
+            tools_to_use = self.all_tools
+        else:
+            enabled_groups = set(enabled_tools)
+            tools_to_use = []
+            for t in self.all_tools:
+                tags = getattr(t, "tags", []) or []
+                name = getattr(t, "name", None)
+                # Match either by tag group or by direct name
+                if enabled_groups.intersection(tags) or name in enabled_groups:
+                    tools_to_use.append(t)
+
+        # Rebuild graph if the active tools differ from the current ones
+        if set(id(t) for t in tools_to_use) != set(id(t) for t in self.tools):
+            print(
+                ">>> Rebuilding graph for tools:",
+                [getattr(t, "name", None) for t in tools_to_use],
+            )
+            await self._build_graph_with_tools(tools_to_use)
+
+        # -------------------------
+        # DEBUG: FOLDER & TOOLS
         # -------------------------
         print("\n========== SIDEKICK RUN DEBUG ==========")
         print(f"User input: {user_input!r}")
         print(f"Folder passed in: {folder!r}")
+        print(f"Enabled tool groups: {enabled_tools}")
+        print("Tools in graph:", [getattr(t, "name", None) for t in self.tools])
 
-        # Set active folder (RAG)
-        if folder:
+        # RAG is considered enabled if:
+        # - enabled_tools is None (all tools), OR
+        # - "rag" is explicitly in enabled_tools.
+        if enabled_tools is None:
+            rag_enabled = True
+        else:
+            rag_enabled = "rag" in enabled_tools
+
+        # Set active folder (RAG) only if RAG is enabled
+        if folder and rag_enabled:
             folder_key = get_absolute_path(folder)
             self.retrieval_service.set_current_folder(folder_key)
             print(f">>> Active RAG folder set to: {folder_key}")
         else:
             self.retrieval_service.set_current_folder(None)
-            print(">>> Active RAG folder set to: NONE")
+            print(">>> Active RAG folder set to: NONE (RAG disabled or no folder)")
 
         # Apply retrieval top_k if provided
         if top_k is not None and top_k > 0:
@@ -289,15 +337,36 @@ class Sidekick:
         print(f">>> Retriever selected: {active_retriever}")
         print("=========================================\n")
 
-        # Thread separation for memory
-        thread_id = thread_id or self.sidekick_id
-        config = {"configurable": {"thread_id": thread_id}}
+        # -------------------------
+        # Thread + config
+        # -------------------------
+
+        # Use a fresh thread_id for each run to avoid reusing partial tool_call state
+        thread_id = str(uuid.uuid4())
+
+        config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "enabled_tools": enabled_tools,
+            }
+        }
+
+        # -------------------------
+        # Initial state (messages)
+        # -------------------------
+
+        # If a history list is provided, use it; otherwise just the current user message
+        if history is not None and len(history) > 0:
+            messages = history
+        else:
+            messages = [HumanMessage(content=user_input)]
 
         initial_state = SidekickState(
-            messages=[HumanMessage(content=user_input)],
+            messages=messages,
             success_criteria="Answer fully",
         )
 
+        # Run the graph
         result = await self.graph.ainvoke(initial_state, config)
 
         # -------------------------
@@ -308,7 +377,7 @@ class Sidekick:
             print(f"[{i}] {type(msg).__name__}: {getattr(msg, 'content', None)!r}")
         print("=========================================\n")
 
-        # Return last assistant answer
+        # Return last assistant answer (ignoring "thinking" messages)
         for msg in reversed(result["messages"]):
             if isinstance(msg, AIMessage) and not msg.content.startswith("💭"):
                 return msg.content

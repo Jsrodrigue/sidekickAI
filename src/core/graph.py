@@ -1,8 +1,10 @@
 """
 Construction of LangGraph Graph.
 """
+
 from datetime import datetime
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+from langchain_core.messages import SystemMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
@@ -10,102 +12,88 @@ from src.core.state import SidekickState
 
 
 class GraphBuilder:
-    """Constructor of the Graph"""
+    """Constructor of the Graph."""
 
-    def __init__(self, worker_llm, evaluator_llm, tools, memory):
+    def __init__(self, worker_llm, tools, memory):
         self.worker_llm = worker_llm
-        self.evaluator_llm = evaluator_llm
         self.tools = tools
         self.memory = memory
 
     # -------------------- Nodes --------------------
 
     def worker_node(self, state: SidekickState) -> dict:
-        """Worker node """
-        system_msg = SystemMessage(
-            content=(
-                f"You are a helpful assistant with tool access.\n\n"
-                f"**Success criteria:** {state.success_criteria or 'Provide a clear, correct answer.'}\n\n"
-                f"**Available tools:**\n- search_documents: search indexed documents\n\n"
-                f"**Current time:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-                "Use tools when you need external information. Be concise."
-            )
+        """Worker node: main LLM with tool access."""
+
+        # Build a single string for the system prompt
+        success_criteria = (
+            state.success_criteria
+            if getattr(state, "success_criteria", None)
+            else "Provide a clear, correct answer."
         )
+
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        system_content = (
+            "You are a helpful assistant with access to several external tools.\n"
+            "Some tools may be *disabled* depending on user settings. Always use tools only when "
+            "they are clearly helpful and necessary.\n\n"
+            
+            "NOTES:\n"
+            "- If a tool is disabled for this run, do not attempt to call it.\n"
+            "- Use tools sparingly and only when needed to answer the user's question.\n"
+            "- When using the Python tool, always use print() to show results. Bare expressions will not display values.\n"
+            "- Whenever you write mathematical expressions in LaTeX, you MUST always use block delimiters with double dollar signs $$ ... $$"
+            "- In each turn use a tool a maximum of 3 times, if you cannot complete the tasks say so and explain what happened.\n\n"
+        
+            f"Success criteria: {success_criteria}\n"
+            f"Current time: {current_time}\n"
+        )
+
+        system_msg = SystemMessage(content=system_content)
+
+        # Prepend system message to the existing conversation
         messages = [system_msg] + state.messages
+
+        # Call the bound LLM (worker_llm already has tools bound)
         response = self.worker_llm.invoke(messages)
+
+        # Return partial state update: add the new assistant message
         return {"messages": [response]}
-
-    def evaluator_node(self, state: SidekickState) -> dict:
-        """Evaluator node"""
-        # Construir contexto de conversación
-        conversation = "\n".join([
-            f"{'User' if isinstance(m, HumanMessage) else 'Assistant'}: {getattr(m, 'content', '')}"
-            for m in state.messages[-6:]
-        ])
-        
-        last_response = state.messages[-1].content if state.messages else ""
-        
-        eval_prompt = (
-            f"Evaluate the conversation:\n\n{conversation}\n\n"
-            f"Last response:\n{last_response}\n\n"
-            f"Success criteria:\n{state.success_criteria or 'Provide clear and correct answer.'}\n\n"
-            "Answer whether the response meets the criteria, whether more user info is required, "
-            "and provide brief feedback."
-        )
-
-        eval_result = self.evaluator_llm.invoke([
-            SystemMessage(content="You are an objective AI evaluator."),
-            HumanMessage(content=eval_prompt)
-        ])
-
-        eval_dict = eval_result.model_dump()
-        eval_dict["timestamp"] = datetime.now().isoformat()
-
-        return {
-            "evaluation_history": [eval_dict],
-            "criteria_met": eval_result.success_criteria_met,
-            "needs_user_input": eval_result.user_input_needed,
-            "messages": [AIMessage(content=f"💭 Evaluation: {eval_result.feedback}")],
-        }
-
     # -------------------- Edge conditions --------------------
 
     def should_continue(self, state: SidekickState) -> str:
-        """Detetermine if use tools or go to evaluator."""
+        """
+        Decide if need to use tools or end
+        """
         last_message = state.messages[-1]
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             return "tools"
-        return "evaluator"
-
-    def should_end(self, state: SidekickState) -> str:
-        """Determine if needs to end or iterate."""
-        if state.criteria_met or state.needs_user_input:
-            return "end"
-        return "worker"
+        return "end"
 
     # -------------------- Construcción --------------------
 
     async def build(self):
         """Build and compile graph."""
         graph_builder = StateGraph(SidekickState)
-        
-        # Agregar nodos
+
+        # Nodos
         graph_builder.add_node("worker", self.worker_node)
         graph_builder.add_node("tools", ToolNode(tools=self.tools))
-        graph_builder.add_node("evaluator", self.evaluator_node)
-        
-        # Agregar edges
+
+        # Edges
         graph_builder.add_edge(START, "worker")
+
+        # worker -> tools (si hay tool_calls) o END (si no)
         graph_builder.add_conditional_edges(
             "worker",
             self.should_continue,
-            {"tools": "tools", "evaluator": "evaluator"}
+            {
+                "tools": "tools",
+                "end": END,
+            },
         )
+
+        # tools -> worker (después de ejecutar tools, volvemos al worker)
         graph_builder.add_edge("tools", "worker")
-        graph_builder.add_conditional_edges(
-            "evaluator",
-            self.should_end,
-            {"worker": "worker", "end": END}
-        )
-        
+
         return graph_builder.compile(checkpointer=self.memory)

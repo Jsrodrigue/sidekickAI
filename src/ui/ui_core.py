@@ -1,41 +1,43 @@
 """
 Gradio app - Sidekick AI
 """
-
-from typing import Optional
 from pathlib import Path
+from typing import Optional
 
 import gradio as gr
 
 from src.ui.auth import login_user, register_user
 from src.ui.gradio_wrappers import (
     MAX_RETRIEVAL_K,
-    wrapped_get_folders,
-    wrapped_add_folder,
-    wrapped_remove_folder,
-    wrapped_index_folder,
-    wrapped_reindex_folder,
-    wrapped_chat,
-    wrapped_load_chat,
-    wrapped_clear_chat,
     format_active_folder_label,
+    wrapped_add_folder,
+    wrapped_chat,
+    wrapped_clear_chat,
+    wrapped_get_folders,
+    wrapped_index_folder,
+    wrapped_load_chat,
+    wrapped_reindex_folder,
+    wrapped_remove_folder,
 )
+
+# Sentinel label for "no folder" mode in the dropdown
+NO_FOLDER_LABEL = "None"
 
 
 def create_ui(css_path: str | None = None):
     """
     Create the full Gradio interface with optional CSS (loaded only if file exists).
     """
-
     css = ""
 
-    # Load CSS if a path is explicitly provided
     if css_path:
         css_file = Path(css_path)
         if css_file.exists():
             css = css_file.read_text()
         else:
-            print(f"[Warning] CSS file not found: {css_path}. Running without custom styles.")
+            print(
+                f"[Warning] CSS file not found: {css_path}. Running without custom styles."
+            )
 
     with gr.Blocks(css=css) as demo:
         # Session state (None = not logged in)
@@ -44,26 +46,19 @@ def create_ui(css_path: str | None = None):
         gr.Markdown("# Sidekick AI")
         gr.Markdown(
             "Register your document folders, and chat with your own knowledge base.\n\n"
+            "You can also chat with no active folder (RAG disabled)."
         )
 
         # ---------- Login Page ----------
         with gr.Column(visible=True, elem_id="login_container") as login_page:
             gr.Markdown("## Login / Register")
 
-            username_input = gr.Textbox(
-                label="Username",
-                placeholder="Enter username",
-            )
-
+            username_input = gr.Textbox(label="Username", placeholder="Enter username")
             password_input = gr.Textbox(
-                label="Password",
-                type="password",
-                placeholder="Enter password",
+                label="Password", type="password", placeholder="Enter password"
             )
 
-            login_status = gr.Label(
-                label="Status",
-            )
+            login_status = gr.Label(label="Status")
 
             with gr.Row():
                 login_btn = gr.Button("🔓 Login", variant="primary")
@@ -71,7 +66,6 @@ def create_ui(css_path: str | None = None):
 
         # ---------- Main Page ----------
         with gr.Column(visible=False) as main_page:
-            # Top bar with logout
             with gr.Row():
                 logout_btn = gr.Button("🚪 Logout", variant="secondary")
 
@@ -92,7 +86,6 @@ def create_ui(css_path: str | None = None):
 
                     folder_status = gr.Label(label="Folder Status")
 
-                    # ---- Indexing parameters (collapsible) ----
                     with gr.Accordion("Indexing parameters (advanced)", open=False):
                         chunk_size_slider = gr.Slider(
                             minimum=128,
@@ -101,7 +94,6 @@ def create_ui(css_path: str | None = None):
                             step=64,
                             label="Chunk size",
                         )
-
                         chunk_overlap_slider = gr.Slider(
                             minimum=0,
                             maximum=512,
@@ -111,17 +103,18 @@ def create_ui(css_path: str | None = None):
                         )
 
                     gr.Markdown("#### Indexed folders")
-
                     folder_dropdown = gr.Dropdown(
-                        choices=[],
+                        choices=[NO_FOLDER_LABEL],
+                        value=NO_FOLDER_LABEL,
                         label="Indexed Folders (active for chat)",
                         interactive=True,
+                        info=(
+                            f"Select a folder to enable RAG, or choose '{NO_FOLDER_LABEL}' "
+                            "to chat without documents."
+                        ),
                     )
 
-                    # Active folder indicator
-                    active_folder_label = gr.Markdown(
-                        format_active_folder_label(None)
-                    )
+                    active_folder_label = gr.Markdown(format_active_folder_label(None))
 
                     with gr.Row():
                         index_folder_btn = gr.Button("🔍 Index Selected (if needed)")
@@ -130,28 +123,40 @@ def create_ui(css_path: str | None = None):
                         remove_folder_btn = gr.Button(
                             "🗑️ Remove Folder", variant="secondary"
                         )
-                        # "Set as Active" not needed: the dropdown itself chooses the active folder
 
                 # ----- RIGHT: Chat -----
                 with gr.Column(scale=2):
-                    gr.Markdown("### 2️⃣ Chat with your documents")
+                    gr.Markdown("### 2️⃣ Chat with Sidekick")
 
-                    # RAG retrieval settings (collapsible)
                     with gr.Accordion("RAG retrieval settings", open=False):
                         retrieval_k_dropdown = gr.Dropdown(
                             choices=list(range(1, MAX_RETRIEVAL_K + 1)),
                             value=5,
                             label="Top-k documents per query",
+                            info="Only used when a folder is selected (RAG enabled).",
+                        )
+
+                    with gr.Accordion("Tool settings", open=False):
+                        tool_selector = gr.CheckboxGroup(
+                            choices=[
+                                "rag",
+                                "files",
+                                "web_search",
+                                "python",
+                                "wikipedia",
+                            ],
+                            value=["rag", "files", "web_search", "python", "wikipedia"],
+                            label="Enabled tool groups",
+                            info="Select which groups of tools Sidekick is allowed to use.",
                         )
 
                     chatbox = gr.Chatbot(
-                        type="messages",
-                        label="Conversation",
-                        height=400,
+                        type="messages", label="Conversation", height=400
                     )
+
                     message_input = gr.Textbox(
                         label="Your Message",
-                        placeholder="Ask something about the active folder...",
+                        placeholder="Ask anything, with or without an active folder...",
                         lines=2,
                     )
 
@@ -161,51 +166,42 @@ def create_ui(css_path: str | None = None):
 
         # ---------- Event Handlers ----------
 
-        # Registration: only show result message in the status label
         register_btn.click(
             lambda u, p: register_user(u, p)[1],
             inputs=[username_input, password_input],
             outputs=login_status,
         )
 
-        # Login handler (async)
         async def handle_login(u, p):
             success, msg = login_user(u, p)
             if success:
                 folders = await wrapped_get_folders(u)
 
-                if folders:
-                    active_folder = folders[0]
-                    history = await wrapped_load_chat(u, active_folder)
-                    label = format_active_folder_label(active_folder)
-                    dropdown_update = gr.update(
-                        choices=folders,
-                        value=active_folder,
-                    )
-                else:
-                    active_folder = None
-                    history = []
-                    label = format_active_folder_label(None)
-                    dropdown_update = gr.update(choices=[], value=None)
+                history = await wrapped_load_chat(u, None)
+                label = format_active_folder_label(None)
 
-                return (
-                    msg,                         # login_status
-                    gr.update(visible=False),     # hide login_page
-                    gr.update(visible=True),      # show main_page
-                    dropdown_update,              # folder_dropdown
-                    u,                            # logged_in_user (State)
-                    history,                      # chatbox
-                    label,                        # active_folder_label
+                dropdown_update = gr.update(
+                    choices=[NO_FOLDER_LABEL] + folders,
+                    value=NO_FOLDER_LABEL,
                 )
 
-            # Login failed: stay on login page
+                return (
+                    msg,
+                    gr.update(visible=False),
+                    gr.update(visible=True),
+                    dropdown_update,
+                    u,
+                    history,
+                    label,
+                )
+
             return (
                 msg,
                 gr.update(visible=True),
                 gr.update(visible=False),
-                gr.update(),                    # folder_dropdown unchanged
-                None,                           # logged_in_user
-                [],                             # empty chatbox
+                gr.update(),
+                None,
+                [],
                 format_active_folder_label(None),
             )
 
@@ -225,23 +221,60 @@ def create_ui(css_path: str | None = None):
 
         # ----- Folder Management events -----
 
-        # Add & index a new folder
+        async def handle_add_folder(username, folder_path):
+            if not username or not folder_path:
+                return "Not logged in or empty folder path", gr.update()
+
+            msg, dropdown_update = await wrapped_add_folder(username, folder_path)
+
+            if isinstance(dropdown_update, dict) and "choices" in dropdown_update:
+                choices = dropdown_update["choices"]
+                if NO_FOLDER_LABEL not in choices:
+                    choices = [NO_FOLDER_LABEL] + choices
+                dropdown_update["choices"] = choices
+
+            return msg, dropdown_update
+
         add_folder_btn.click(
-            wrapped_add_folder,
+            handle_add_folder,
             inputs=[logged_in_user, folder_input],
             outputs=[folder_status, folder_dropdown],
         )
 
-        # Remove selected folder
+        async def handle_remove_folder(username, folder):
+            if not username or not folder or folder == NO_FOLDER_LABEL:
+                return "Select a real folder to remove", gr.update(
+                    choices=[NO_FOLDER_LABEL], value=NO_FOLDER_LABEL
+                )
+
+            msg, dropdown_update = await wrapped_remove_folder(username, folder)
+
+            if isinstance(dropdown_update, dict) and "choices" in dropdown_update:
+                choices = dropdown_update["choices"]
+                if NO_FOLDER_LABEL not in choices:
+                    choices = [NO_FOLDER_LABEL] + choices
+
+                value = dropdown_update.get("value") or NO_FOLDER_LABEL
+                dropdown_update["choices"] = choices
+                dropdown_update["value"] = value
+
+            return msg, dropdown_update
+
         remove_folder_btn.click(
-            wrapped_remove_folder,
+            handle_remove_folder,
             inputs=[logged_in_user, folder_dropdown],
             outputs=[folder_status, folder_dropdown],
         )
 
-        # Index selected folder (if not already indexed)
+        async def handle_index_folder(username, folder, chunk_size, chunk_overlap):
+            if not username or not folder or folder == NO_FOLDER_LABEL:
+                return "Select a real folder to index"
+            return await wrapped_index_folder(
+                username, folder, chunk_size, chunk_overlap
+            )
+
         index_folder_btn.click(
-            wrapped_index_folder,
+            handle_index_folder,
             inputs=[
                 logged_in_user,
                 folder_dropdown,
@@ -251,9 +284,15 @@ def create_ui(css_path: str | None = None):
             outputs=folder_status,
         )
 
-        # Force reindex selected folder
+        async def handle_reindex_folder(username, folder, chunk_size, chunk_overlap):
+            if not username or not folder or folder == NO_FOLDER_LABEL:
+                return "Select a real folder to reindex"
+            return await wrapped_reindex_folder(
+                username, folder, chunk_size, chunk_overlap
+            )
+
         reindex_folder_btn.click(
-            wrapped_reindex_folder,
+            handle_reindex_folder,
             inputs=[
                 logged_in_user,
                 folder_dropdown,
@@ -263,13 +302,16 @@ def create_ui(css_path: str | None = None):
             outputs=folder_status,
         )
 
-        # When user changes folder → load that folder's history + update label
         async def handle_folder_change(username: Optional[str], folder: Optional[str]):
-            if not username or not folder:
+            if not username:
                 return [], format_active_folder_label(None)
+
+            if folder == NO_FOLDER_LABEL:
+                history = await wrapped_load_chat(username, None)
+                return history, format_active_folder_label(None)
+
             history = await wrapped_load_chat(username, folder)
-            label = format_active_folder_label(folder)
-            return history, label
+            return history, format_active_folder_label(folder)
 
         folder_dropdown.change(
             fn=handle_folder_change,
@@ -279,33 +321,42 @@ def create_ui(css_path: str | None = None):
 
         # ----- Chat events -----
 
-        # Chat send button
+        async def handle_chat(username, folder, message, top_k, enabled_tools):
+            if folder == NO_FOLDER_LABEL:
+                folder = None
+            return await wrapped_chat(username, folder, message, top_k, enabled_tools)
+
         send_btn.click(
-            wrapped_chat,
+            handle_chat,
             inputs=[
                 logged_in_user,
                 folder_dropdown,
                 message_input,
                 retrieval_k_dropdown,
+                tool_selector,
             ],
             outputs=[chatbox, message_input],
         )
 
-        # Pressing Enter in the textbox also sends
         message_input.submit(
-            wrapped_chat,
+            handle_chat,
             inputs=[
                 logged_in_user,
                 folder_dropdown,
                 message_input,
                 retrieval_k_dropdown,
+                tool_selector,
             ],
             outputs=[chatbox, message_input],
         )
 
-        # Clear chat button (for the current folder)
+        async def handle_clear_chat(username, folder):
+            if folder == NO_FOLDER_LABEL:
+                folder = None
+            return await wrapped_clear_chat(username, folder)
+
         clear_btn.click(
-            wrapped_clear_chat,
+            handle_clear_chat,
             inputs=[logged_in_user, folder_dropdown],
             outputs=chatbox,
         )
@@ -313,19 +364,16 @@ def create_ui(css_path: str | None = None):
         # ----- Logout event -----
 
         def handle_logout():
-            """
-            Reset fields, state, and go back to the login screen.
-            """
             return (
-                "",   # username_input
-                "",   # password_input
-                "Logged out",  # login_status
-                gr.update(visible=True),    # login_page visible
-                gr.update(visible=False),   # main_page hidden
-                [],                         # empty chatbox
-                gr.update(choices=[], value=None),  # empty folder_dropdown
-                format_active_folder_label(None),   # active folder label
-                None,  # logged_in_user (State) = logged out
+                "",
+                "",
+                "Logged out",
+                gr.update(visible=True),
+                gr.update(visible=False),
+                [],
+                gr.update(choices=[NO_FOLDER_LABEL], value=NO_FOLDER_LABEL),
+                format_active_folder_label(None),
+                None,
             )
 
         logout_btn.click(

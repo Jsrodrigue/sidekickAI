@@ -1,11 +1,79 @@
-"""
-Gradio UI event handlers.
-Connects the frontend with the backend services.
-"""
+from __future__ import annotations
+
+import re
 from langchain_core.messages import AIMessage, HumanMessage
 
 # Special key for the user's GLOBAL state (e.g. list of indexed folders)
 _GLOBAL_FOLDER_KEY = "__global__"
+# Special key for chats when NO folder is selected
+_NO_FOLDER_CHAT_KEY = "__no_folder__"
+
+# Reminder injected into the prompt when Python tool is enabled (NOT meant to be visible)
+IMPORTANT_PYTHON_PRINT_REMINDER = (
+    "IMPORTANT REMINDER: If you use the Python tool to compute or inspect anything, "
+    "ALWAYS use print() statements to show the final values you want the user to see. "
+    "Do not rely on implicit output.\n"
+)
+
+# -------------------- LaTeX cleaner --------------------
+
+_LATEX_BRACKET_BLOCK = re.compile(r"\\\[(.*?)\\\]", re.DOTALL)   # \[ ... \]
+_LATEX_PAREN_INLINE = re.compile(r"\\\((.*?)\\\)", re.DOTALL)    # \( ... \)
+_LATEX_SINGLE_DOLLAR = re.compile(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", re.DOTALL)
+
+
+def clean_latex_to_double_dollars(text: str) -> str:
+    """
+    Normalize LaTeX delimiters to $$...$$
+
+    - Converts \[...\] to $$...$$
+    - Converts \(...\) to $$...$$
+    - Converts $...$ to $$...$$ only when it looks like math (contains a backslash
+      or common math symbols), to avoid breaking currency like "$10".
+    """
+    if not text:
+        return text
+
+    text = _LATEX_BRACKET_BLOCK.sub(lambda m: f"$${m.group(1).strip()}$$", text)
+    text = _LATEX_PAREN_INLINE.sub(lambda m: f"$${m.group(1).strip()}$$", text)
+
+    def _maybe_upgrade_single_dollar(m: re.Match) -> str:
+        inner = (m.group(1) or "").strip()
+        looks_like_math = (
+            "\\" in inner
+            or any(sym in inner for sym in ["=", "+", "-", "*", "/", "^", "_", "{", "}", "\\frac", "\\sum", "\\int"])
+        )
+        if not looks_like_math:
+            return m.group(0)  # likely currency or plain text
+        return f"$${inner}$$"
+
+    text = _LATEX_SINGLE_DOLLAR.sub(_maybe_upgrade_single_dollar, text)
+    return text
+
+
+def _hide_injected_user_reminder(messages, injected: str, original: str) -> None:
+    """
+    If we injected a hidden reminder into the user prompt, undo that in the
+    stored message history so it never appears in chat/history.
+
+    We try to find the latest user message matching the injected content and replace it.
+    """
+    if not messages:
+        return
+
+    # Walk backwards to find the most recent user message
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+
+        # LangChain HumanMessage
+        if isinstance(msg, HumanMessage) and msg.content == injected:
+            messages[i].content = original
+            return
+
+        # Dict message format
+        if isinstance(msg, dict) and msg.get("role") == "user" and msg.get("content") == injected:
+            msg["content"] = original
+            return
 
 
 class UIHandlers:
@@ -17,10 +85,6 @@ class UIHandlers:
     # -------------------- Load / Save GLOBAL Session --------------------
 
     def load_session(self, username: str):
-        """
-        Load the GLOBAL session for a user (not tied to a specific folder).
-        Useful if you want to keep other user-level data.
-        """
         try:
             state = self.session_service.load(username, _GLOBAL_FOLDER_KEY)
             return True, "Session loaded", state.messages
@@ -28,78 +92,83 @@ class UIHandlers:
             return False, f"Error: {e}", []
 
     def save_session(self, username: str, state):
-        """
-        Save the GLOBAL session for a user.
-        """
         try:
             self.session_service.save(username, _GLOBAL_FOLDER_KEY, state)
             return True, "Session saved"
         except Exception as e:
             return False, f"Error: {e}"
 
-    # -------------------- Chat (per user & folder) --------------------
+    # -------------------- Chat (per user & folder OR no-folder) --------------------
 
     async def chat(
         self,
         username: str,
-        folder: str,
+        folder: str | None,
         prompt: str,
         top_k: int,
+        enabled_tools: list[str] | None = None,
     ):
-        """
-        Chat for a specific (username, folder) pair.
-        Keeps separate, persistent histories per folder.
-
-        top_k controls how many documents RAG will retrieve per query and
-        is forwarded to SidekickService / Sidekick.
-        """
         try:
-            if not folder:
-                raise ValueError("No folder selected for chat.")
+            if not username:
+                raise ValueError("No username provided for chat.")
 
-            # 1) Load chat state for THIS (username, folder)
-            state = self.session_service.load(username, folder)
+            enabled_tools = enabled_tools or []
 
-            # 2) Send message to Sidekick (thread_id uses username + folder)
-            #    SidekickService.send_message is expected to support `top_k`.
+            folder_key = folder if folder else _NO_FOLDER_CHAT_KEY
+            state = self.session_service.load(username, folder_key)
+
+            # Inject reminder ONLY for the model call, but we will remove it from history afterwards
+            original_prompt = prompt
+            injected_prompt = prompt
+            injected = False
+
+            if "python" in enabled_tools:
+                injected_prompt = IMPORTANT_PYTHON_PRINT_REMINDER + prompt
+                injected = True
+
             new_state = await self.sidekick_service.send_message(
-                prompt=prompt,
+                prompt=injected_prompt,
                 state=state,
                 username=username,
-                folder=folder,
+                folder=folder if folder else None,
                 top_k=top_k,
+                enabled_tools=enabled_tools,
             )
 
-            # 3) Save updated state for THIS (username, folder)
-            self.session_service.save(username, folder, new_state)
+            # Remove the injected reminder from stored history so it never appears in the UI
+            if injected:
+                _hide_injected_user_reminder(new_state.messages, injected_prompt, original_prompt)
 
-            # 4) Convert to Gradio `type="messages"` format
+            # Save updated state AFTER cleaning it
+            self.session_service.save(username, folder_key, new_state)
+
+            # Convert to Gradio format + LaTeX cleanup for assistant messages
             gr_messages = []
             for msg in new_state.messages:
                 if isinstance(msg, HumanMessage):
                     gr_messages.append({"role": "user", "content": msg.content})
                 elif isinstance(msg, AIMessage):
-                    gr_messages.append({"role": "assistant", "content": msg.content})
-                elif isinstance(msg, dict) and "role" in msg:
                     gr_messages.append(
-                        {"role": msg["role"], "content": msg.get("content", "")}
+                        {"role": "assistant", "content": clean_latex_to_double_dollars(msg.content)}
                     )
+                elif isinstance(msg, dict) and "role" in msg:
+                    content = msg.get("content", "")
+                    if msg["role"] == "assistant":
+                        content = clean_latex_to_double_dollars(content)
+                    gr_messages.append({"role": msg["role"], "content": content})
 
             return gr_messages, ""
 
         except Exception as e:
             return [{"role": "assistant", "content": f"Error: {e}"}], ""
 
-    async def load_chat(self, username: str, folder: str):
-        """
-        Load the existing chat history for (username, folder).
-        Useful when switching folders or reopening the app.
-        """
-        if not folder:
+    async def load_chat(self, username: str, folder: str | None):
+        if not username:
             return []
 
         try:
-            state = self.session_service.load(username, folder)
+            folder_key = folder if folder else _NO_FOLDER_CHAT_KEY
+            state = self.session_service.load(username, folder_key)
         except Exception:
             return []
 
@@ -108,26 +177,26 @@ class UIHandlers:
             if isinstance(msg, HumanMessage):
                 gr_messages.append({"role": "user", "content": msg.content})
             elif isinstance(msg, AIMessage):
-                gr_messages.append({"role": "assistant", "content": msg.content})
-            elif isinstance(msg, dict) and "role" in msg:
                 gr_messages.append(
-                    {"role": msg["role"], "content": msg.get("content", "")}
+                    {"role": "assistant", "content": clean_latex_to_double_dollars(msg.content)}
                 )
+            elif isinstance(msg, dict) and "role" in msg:
+                content = msg.get("content", "")
+                if msg["role"] == "assistant":
+                    content = clean_latex_to_double_dollars(content)
+                gr_messages.append({"role": msg["role"], "content": content})
 
         return gr_messages
 
-    def clear_chat(self, username: str, folder: str):
-        """
-        Clear ONLY the chat for (username, folder).
-        Does not affect chats for other folders.
-        """
+    def clear_chat(self, username: str, folder: str | None):
         try:
-            if not folder:
+            if not username:
                 return []
 
-            state = self.session_service.load(username, folder)
+            folder_key = folder if folder else _NO_FOLDER_CHAT_KEY
+            state = self.session_service.load(username, folder_key)
             state.messages = []
-            self.session_service.save(username, folder, state)
+            self.session_service.save(username, folder_key, state)
             return []
         except Exception:
             return []
@@ -135,10 +204,6 @@ class UIHandlers:
     # -------------------- Folder Management (GLOBAL per user) --------------------
 
     def get_folders(self, username: str):
-        """
-        Return all indexed folders for the given user.
-        Stored in the user's GLOBAL session (username, __global__).
-        """
         try:
             state = self.session_service.load(username, _GLOBAL_FOLDER_KEY)
             return getattr(state, "indexed_directories", [])
@@ -146,12 +211,7 @@ class UIHandlers:
             return []
 
     async def add_folder(self, username: str, folder: str):
-        """
-        Add a folder to the user's index list (GLOBAL)
-        and ensure it is indexed via FolderService/Sidekick.
-        """
         try:
-            # GLOBAL state for that user
             state = self.session_service.load(username, _GLOBAL_FOLDER_KEY)
 
             if not hasattr(state, "indexed_directories"):
@@ -159,9 +219,7 @@ class UIHandlers:
 
             if folder not in state.indexed_directories:
                 state.indexed_directories.append(folder)
-                # Ensure the folder is indexed (with default chunk params inside FolderService)
                 new_state = await self.folder_service.ensure_indexed(folder, state)
-                # Save GLOBAL state
                 self.session_service.save(username, _GLOBAL_FOLDER_KEY, new_state)
                 return "Folder added", new_state.indexed_directories
 
@@ -170,40 +228,22 @@ class UIHandlers:
             return f"Error: {e}", []
 
     async def remove_folder(self, username: str, folder: str):
-        """
-        Remove a folder from the user's index list (GLOBAL),
-        and optionally clear that folder's index in the vectorstore.
-        """
         try:
             state = self.session_service.load(username, _GLOBAL_FOLDER_KEY)
 
             if hasattr(state, "indexed_directories") and folder in state.indexed_directories:
                 state.indexed_directories.remove(folder)
-                # Optionally clear the vector index for that folder
                 new_state = await self.folder_service.clear_folder(folder, state)
                 self.session_service.save(username, _GLOBAL_FOLDER_KEY, new_state)
                 return "Folder removed", new_state.indexed_directories
 
-            return "Folder not found"
+            return "Folder not found", getattr(state, "indexed_directories", [])
         except Exception as e:
-            return f"Error: {e}"
+            return f"Error: {e}", []
 
-    async def index_folder(
-        self,
-        username: str,
-        folder: str,
-        chunk_size: int,
-        chunk_overlap: int,
-    ):
-        """
-        Index the contents of a specific folder.
-
-        This is a GLOBAL per-user operation, not tied to chat history.
-        chunk_size and chunk_overlap control how documents are split.
-        """
+    async def index_folder(self, username: str, folder: str, chunk_size: int, chunk_overlap: int):
         try:
             state = self.session_service.load(username, _GLOBAL_FOLDER_KEY)
-            # FolderService.ensure_indexed is expected to accept chunk params now
             new_state = await self.folder_service.ensure_indexed(
                 folder=folder,
                 state=state,
@@ -215,20 +255,9 @@ class UIHandlers:
         except Exception as e:
             return f"Error: {e}"
 
-    async def reindex_folder(
-        self,
-        username: str,
-        folder: str,
-        chunk_size: int,
-        chunk_overlap: int,
-    ):
-        """
-        Force reindexing of the selected folder,
-        using the provided chunk_size and chunk_overlap.
-        """
+    async def reindex_folder(self, username: str, folder: str, chunk_size: int, chunk_overlap: int):
         try:
             state = self.session_service.load(username, _GLOBAL_FOLDER_KEY)
-            # FolderService.reindex_folder is expected to accept chunk params now
             new_state = await self.folder_service.reindex_folder(
                 folder=folder,
                 state=state,
@@ -241,10 +270,6 @@ class UIHandlers:
             return f"Error: {e}"
 
     async def clear_folder(self, username: str, folder: str):
-        """
-        Clear the vector index for the selected folder,
-        and update the user's GLOBAL state.
-        """
         try:
             state = self.session_service.load(username, _GLOBAL_FOLDER_KEY)
             new_state = await self.folder_service.clear_folder(folder, state)
