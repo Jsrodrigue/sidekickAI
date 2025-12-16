@@ -1,4 +1,4 @@
-from src.ui.ui_core import create_ui
+from src.ui.ui_layout import create_ui
 from dotenv import load_dotenv
 from src.db.db import init_db
 

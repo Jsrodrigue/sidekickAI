@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from src.services.auth_service import AuthService
 
 auth_service = AuthService()
