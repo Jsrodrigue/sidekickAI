@@ -32,7 +32,6 @@ class UIRefs:
     add_folder_btn: gr.Button
     remove_folder_btn: gr.Button
     index_folder_btn: gr.Button
-    reindex_folder_btn: gr.Button
     chunk_size_slider: gr.Slider
     chunk_overlap_slider: gr.Slider
 
@@ -158,29 +157,6 @@ def wire_events(refs: UIRefs, *, NO_FOLDER_LABEL: str) -> None:
 
     refs.index_folder_btn.click(
         handle_index_folder,
-        inputs=[
-            refs.logged_in_user,
-            refs.folder_dropdown,
-            refs.chunk_size_slider,
-            refs.chunk_overlap_slider,
-        ],
-        outputs=refs.folder_status,
-    )
-
-    # ---------- Folder: Reindex ----------
-    async def handle_reindex_folder(
-        username: Optional[str],
-        folder: Optional[str],
-        chunk_size: int,
-        chunk_overlap: int,
-    ):
-        if not username or not folder or folder == NO_FOLDER_LABEL:
-            return "Select a real folder to reindex"
-        h = await get_controller()
-        return await h.reindex_folder(username, folder, chunk_size, chunk_overlap)
-
-    refs.reindex_folder_btn.click(
-        handle_reindex_folder,
         inputs=[
             refs.logged_in_user,
             refs.folder_dropdown,
