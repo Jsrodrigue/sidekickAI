@@ -17,3 +17,5 @@ database.db
 # Example 
 knowledge_base/
 sandbox/
+
+.gradio/
