@@ -3,6 +3,7 @@ from typing import Any, Iterable
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.ui.text_utils import clean_latex_to_double_dollars
+from src.utils.path_utils import normalize_path, get_absolute_path
 
 _GLOBAL_FOLDER_KEY = "__global__"
 _NO_FOLDER_CHAT_KEY = "__no_folder__"
@@ -38,6 +39,22 @@ class UIController:
         self.session_service = session_service
         self.folder_service = folder_service
         self.sidekick_service = sidekick_service
+
+    # ---------- Canonical path helper ----------
+
+    def _canonical_path(self, path: str) -> str:
+        """
+        Canonicalize folder path so that:
+        - indexing
+        - removal
+        - manifest keys
+        - retrieval_service keys
+        always match.
+
+        This fixes the "remove folder doesn't delete vectorstore" bug caused by
+        mismatched relative/absolute/normalized keys.
+        """
+        return get_absolute_path(normalize_path(path))
 
     # ---------- Session helpers ----------
 
@@ -107,6 +124,10 @@ class UIController:
                 raise ValueError("No username provided for chat.")
 
             enabled_tools = enabled_tools or []
+
+            # IMPORTANT:
+            # folder here is the dropdown value. We store canonical values in the dropdown now,
+            # so we can use it directly.
             folder_key = self._folder_key(folder)
 
             state = self._load_state(username, folder_key)
@@ -167,9 +188,11 @@ class UIController:
             if not hasattr(state, "indexed_directories"):
                 state.indexed_directories = []
 
-            if folder not in state.indexed_directories:
-                state.indexed_directories.append(folder)
-                new_state = await self.folder_service.ensure_indexed(folder, state)
+            canonical = self._canonical_path(folder)
+
+            if canonical not in state.indexed_directories:
+                state.indexed_directories.append(canonical)
+                new_state = await self.folder_service.ensure_indexed(canonical, state)
                 self._save_state(username, _GLOBAL_FOLDER_KEY, new_state)
                 return "Folder added", new_state.indexed_directories
 
@@ -181,9 +204,11 @@ class UIController:
         try:
             state = self._load_state(username, _GLOBAL_FOLDER_KEY)
 
-            if hasattr(state, "indexed_directories") and folder in state.indexed_directories:
-                state.indexed_directories.remove(folder)
-                new_state = await self.folder_service.clear_folder(folder, state)
+            canonical = self._canonical_path(folder)
+
+            if hasattr(state, "indexed_directories") and canonical in state.indexed_directories:
+                state.indexed_directories.remove(canonical)
+                new_state = await self.folder_service.clear_folder(canonical, state)
                 self._save_state(username, _GLOBAL_FOLDER_KEY, new_state)
                 return "Folder removed", new_state.indexed_directories
 
@@ -194,8 +219,9 @@ class UIController:
     async def index_folder(self, username: str, folder: str, chunk_size: int, chunk_overlap: int):
         try:
             state = self._load_state(username, _GLOBAL_FOLDER_KEY)
+            canonical = self._canonical_path(folder)
             new_state = await self.folder_service.ensure_indexed(
-                folder=folder,
+                folder=canonical,
                 state=state,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
@@ -208,8 +234,9 @@ class UIController:
     async def reindex_folder(self, username: str, folder: str, chunk_size: int, chunk_overlap: int):
         try:
             state = self._load_state(username, _GLOBAL_FOLDER_KEY)
+            canonical = self._canonical_path(folder)
             new_state = await self.folder_service.reindex_folder(
-                folder=folder,
+                folder=canonical,
                 state=state,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
@@ -222,7 +249,8 @@ class UIController:
     async def clear_folder(self, username: str, folder: str):
         try:
             state = self._load_state(username, _GLOBAL_FOLDER_KEY)
-            new_state = await self.folder_service.clear_folder(folder, state)
+            canonical = self._canonical_path(folder)
+            new_state = await self.folder_service.clear_folder(canonical, state)
             self._save_state(username, _GLOBAL_FOLDER_KEY, new_state)
             return "Folder cleared"
         except Exception as e:

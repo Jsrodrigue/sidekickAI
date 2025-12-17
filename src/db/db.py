@@ -1,4 +1,3 @@
-# src/db/db.py
 import sqlite3
 from pathlib import Path
 from typing import List

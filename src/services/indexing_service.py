@@ -8,6 +8,7 @@ import os
 import shutil
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from langchain_community.document_loaders import (
@@ -24,7 +25,9 @@ from src.utils.path_utils import is_excluded_path, normalize_path
 
 
 class IndexingService:
-    """Service to index folders and create/load persistent vectorstores."""
+    """Service to index folders/files and create/load persistent vectorstores."""
+
+    SUPPORTED_EXTENSIONS = {".md", ".txt", ".py", ".pdf"}
 
     def __init__(self, embeddings: OpenAIEmbeddings, vectorstore_root: str):
         self.embeddings = embeddings
@@ -34,28 +37,133 @@ class IndexingService:
     # -------------------- Document loading --------------------
 
     def load_documents(
-        self, directory: str, excluded_dirs: Optional[List[str]] = None
+        self,
+        path: str,
+        excluded_dirs: Optional[List[str]] = None,
+        recursive: bool = True,
     ) -> List:
-        """Load all the documents from a directory, with excluded subdirectories."""
-        excluded_dirs = excluded_dirs or [".venv", "venv", "__pycache__"]
-        docs = []
+        """
+        Load documents from:
+        - a directory (scan by extension)
+        - OR a single file path (load only that file)
 
-        # Load Markdown files
-        docs.extend(self._load_markdown_files(directory, excluded_dirs))
-        # Load text files
-        docs.extend(self._load_text_files(directory, excluded_dirs))
-        # Load Python files
-        docs.extend(self._load_python_files(directory, excluded_dirs))
-        # Load PDFs
-        docs.extend(self._load_pdf_files(directory, excluded_dirs))
+        Backward compatible: calling with a directory behaves like before.
+        """
+        excluded_dirs = excluded_dirs or [".venv", "venv", "__pycache__"]
+        path = normalize_path(path)
+
+        if os.path.isdir(path):
+            return self._load_documents_from_directory(
+                directory=path, excluded_dirs=excluded_dirs, recursive=recursive
+            )
+
+        if os.path.isfile(path):
+            return self._load_documents_from_file(path, excluded_dirs)
+
+        print(f"[WARNING] Path not found or invalid: {path}")
+        return []
+
+    def load_documents_from_paths(
+        self,
+        paths: List[str],
+        excluded_dirs: Optional[List[str]] = None,
+        recursive: bool = True,
+    ) -> List:
+        """
+        Load documents from a list of paths that can include BOTH directories and files.
+        - Directories are scanned
+        - Files are loaded directly
+        """
+        excluded_dirs = excluded_dirs or [".venv", "venv", "__pycache__"]
+        docs: List = []
+
+        for raw in paths:
+            if not raw:
+                continue
+            p = normalize_path(raw)
+
+            if os.path.isdir(p):
+                docs.extend(
+                    self._load_documents_from_directory(
+                        directory=p, excluded_dirs=excluded_dirs, recursive=recursive
+                    )
+                )
+            elif os.path.isfile(p):
+                docs.extend(self._load_documents_from_file(p, excluded_dirs))
+            else:
+                print(f"[WARNING] Path not found or invalid: {p}")
 
         return docs
 
-    def _load_markdown_files(self, directory: str, excluded_dirs: List[str]) -> List:
+    def _load_documents_from_directory(
+        self, directory: str, excluded_dirs: List[str], recursive: bool = True
+    ) -> List:
+        """Load all supported documents from a directory (optionally recursive)."""
+        docs: List = []
+
+        # Preserve your original behavior (recursive scan)
+        pattern = "**" if recursive else "*"
+
+        # Load Markdown files
+        docs.extend(self._load_markdown_files(directory, excluded_dirs, pattern))
+        # Load text files
+        docs.extend(self._load_text_files(directory, excluded_dirs, pattern))
+        # Load Python files
+        docs.extend(self._load_python_files(directory, excluded_dirs, pattern))
+        # Load PDFs
+        docs.extend(self._load_pdf_files(directory, excluded_dirs, pattern))
+
+        return docs
+
+    def _load_documents_from_file(self, file_path: str, excluded_dirs: List[str]) -> List:
+        """Load a single supported file by extension."""
+        docs: List = []
+        file_path = normalize_path(file_path)
+
+        if is_excluded_path(file_path, excluded_dirs):
+            return docs
+
+        if not os.path.isfile(file_path):
+            print(f"[WARNING] File not found: {file_path}")
+            return docs
+
+        ext = Path(file_path).suffix.lower()
+        if ext not in self.SUPPORTED_EXTENSIONS:
+            print(f"[INFO] Unsupported extension (skipped): {file_path}")
+            return docs
+
+        try:
+            if ext == ".md":
+                loader = UnstructuredMarkdownLoader(file_path)
+                docs.extend(loader.load())
+
+            elif ext == ".txt":
+                # keep your original encoding fallback behavior
+                try:
+                    loader = TextLoader(file_path, encoding="utf-8")
+                    docs.extend(loader.load())
+                except UnicodeDecodeError:
+                    loader = TextLoader(file_path, encoding="latin-1")
+                    docs.extend(loader.load())
+
+            elif ext == ".py":
+                loader = PythonLoader(file_path)
+                docs.extend(loader.load())
+
+            elif ext == ".pdf":
+                loader = PyPDFLoader(file_path)
+                docs.extend(loader.load())
+
+        except Exception as e:
+            print(f"[ERROR] Failed to load file {file_path}: {e}")
+
+        return docs
+
+    def _load_markdown_files(self, directory: str, excluded_dirs: List[str], pattern: str) -> List:
         """Load markdown files."""
         docs = []
         try:
-            md_paths = glob.glob(os.path.join(directory, "**", "*.md"), recursive=True)
+            md_paths = glob.glob(os.path.join(directory, pattern, "*.md"), recursive=True)
             for md_path in md_paths:
                 if is_excluded_path(md_path, excluded_dirs):
                     continue
@@ -73,16 +181,15 @@ class IndexingService:
         print(f"[INFO] Loaded {len(docs)} Markdown files")
         return docs
 
-    def _load_text_files(self, directory: str, excluded_dirs: List[str]) -> List:
+    def _load_text_files(self, directory: str, excluded_dirs: List[str], pattern: str) -> List:
         """Load text files."""
         docs = []
         try:
-            txt_paths = glob.glob(
-                os.path.join(directory, "**", "*.txt"), recursive=True
-            )
+            txt_paths = glob.glob(os.path.join(directory, pattern, "*.txt"), recursive=True)
             for p in txt_paths:
                 if is_excluded_path(p, excluded_dirs):
                     continue
+                p = normalize_path(p)
                 try:
                     loader = TextLoader(p, encoding="utf-8")
                     docs.extend(loader.load())
@@ -98,14 +205,15 @@ class IndexingService:
         print(f"[INFO] Loaded {len(docs)} text files")
         return docs
 
-    def _load_python_files(self, directory: str, excluded_dirs: List[str]) -> List:
+    def _load_python_files(self, directory: str, excluded_dirs: List[str], pattern: str) -> List:
         """Load python files."""
         docs = []
         try:
-            py_paths = glob.glob(os.path.join(directory, "**", "*.py"), recursive=True)
+            py_paths = glob.glob(os.path.join(directory, pattern, "*.py"), recursive=True)
             for p in py_paths:
                 if is_excluded_path(p, excluded_dirs):
                     continue
+                p = normalize_path(p)
                 try:
                     loader = PythonLoader(p)
                     docs.extend(loader.load())
@@ -117,16 +225,15 @@ class IndexingService:
         print(f"[INFO] Loaded {len(docs)} Python files")
         return docs
 
-    def _load_pdf_files(self, directory: str, excluded_dirs: List[str]) -> List:
+    def _load_pdf_files(self, directory: str, excluded_dirs: List[str], pattern: str) -> List:
         """Load PDF files."""
         docs = []
         try:
-            pdf_paths = glob.glob(
-                os.path.join(directory, "**", "*.pdf"), recursive=True
-            )
+            pdf_paths = glob.glob(os.path.join(directory, pattern, "*.pdf"), recursive=True)
             for p in pdf_paths:
                 if is_excluded_path(p, excluded_dirs):
                     continue
+                p = normalize_path(p)
                 try:
                     loader = PyPDFLoader(p)
                     docs.extend(loader.load())
@@ -156,9 +263,7 @@ class IndexingService:
             valid_docs.append(doc)
         return valid_docs
 
-    def chunk_documents(
-        self, docs: List, chunk_size: int = 600, chunk_overlap: int = 20
-    ) -> List:
+    def chunk_documents(self, docs: List, chunk_size: int = 600, chunk_overlap: int = 20) -> List:
         """Divide documents into chunks."""
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size, chunk_overlap=chunk_overlap
@@ -170,7 +275,10 @@ class IndexingService:
     def create_vectorstore(
         self, chunks: List, directory_name: str
     ) -> Tuple[Optional[Chroma], Optional[str]]:
-        """Create a persistent Chroma vectorstore for a given directory."""
+        """
+        Create a persistent Chroma vectorstore.
+        directory_name is used only to create a readable persist folder name.
+        """
         persist_dir = os.path.join(
             self.vectorstore_root,
             f"{os.path.basename(directory_name)}_{uuid.uuid4().hex[:8]}",
@@ -196,7 +304,7 @@ class IndexingService:
         """
         Load an existing Chroma vectorstore from disk.
 
-        Used at startup to restore previously indexed folders
+        Used at startup to restore previously indexed folders/files
         without re-indexing documents.
         """
         try:

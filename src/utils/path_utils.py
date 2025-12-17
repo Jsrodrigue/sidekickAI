@@ -1,6 +1,7 @@
 """
-Utilities for paths handle
+Utilities for path handling.
 """
+
 import os
 from typing import Optional, List
 
@@ -17,10 +18,10 @@ def is_excluded_path(path: str, excluded_dirs: Optional[List[str]] = None) -> bo
     """Verify if a path must be excluded."""
     if not path:
         return True
-    
+
     excluded_dirs = excluded_dirs or [".venv", "venv", "__pycache__"]
     parts = normalize_path(path).replace("\\", "/").split("/")
-    
+
     return any(ex in parts for ex in excluded_dirs)
 
 
@@ -28,7 +29,7 @@ def validate_directory(directory: str) -> bool:
     """Validate if a directory exists and is accessible."""
     if not directory:
         return False
-    
+
     normalized = normalize_path(directory)
     return os.path.exists(normalized) and os.path.isdir(normalized)
 

@@ -1,10 +1,5 @@
 from langchain_experimental.tools import PythonREPLTool
-try:
-    # LangChain <= 0.1.x
-    from langchain.tools import Tool
-except ImportError:
-    # LangChain >= 0.2.x
-    from langchain_core.tools import Tool
+from langchain_core.tools import Tool
 
 
 def build_python_tools():

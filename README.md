@@ -1,4 +1,4 @@
-# Sidekick Project
+# SidekickAI
 
 ## Introduction
 Sidekick is a personal AI assistant designed to enhance productivity by integrating advanced language model capabilities into everyday workflows. It helps users organize knowledge, automate tasks, and interact with information through structured, persistent conversations.
@@ -74,6 +74,12 @@ OPENAI_API_KEY=your_openai_api_key_here
 SERPER_API_KEY=your_serper_api_key_here  
 
 ## Installation
+### Clone the repository from GitHub
+
+```bash
+git clone https://github.com/Jsrodrigue/sidekickAI.git
+cd sidekickAI
+```
 
 ### Option 1: Using venv and requirements.txt
     python -m venv .venv
