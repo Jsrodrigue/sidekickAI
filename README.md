@@ -37,6 +37,13 @@ The project is built as a practical, extensible system that combines Large Langu
   - Python source files (.py)
 - The indexing pipeline is designed to be easily extensible to support additional file formats.
 
+## Important Note About RAG
+RAG (Retrieval-Augmented Generation) is implemented as **one of Sidekick’s tools**, not a mandatory step.
+
+- RAG is only used when it is **enabled** and when the agent decides it is **useful/necessary** for a given prompt.
+- If RAG is disabled (via tool settings) or if no folder/file context is selected, Sidekick will answer using the LLM and any other enabled tools.
+- This keeps the agent flexible: it can work as a general assistant, or as a knowledge-base assistant, depending on the session configuration.
+
 ## Why It Matters
 Managing multiple contexts and information sources is difficult in fast-paced environments. Sidekick reduces cognitive load by keeping knowledge bases and chats clearly separated while automating repetitive tasks and information retrieval.
 
@@ -55,7 +62,6 @@ Managing multiple contexts and information sources is difficult in fast-paced en
   <br/>
   <strong>Main page</strong>
 </p>
-
 
 ## Usage
 1. Create an account.
@@ -76,33 +82,36 @@ SERPER_API_KEY=your_serper_api_key_here
 ## Installation
 ### Clone the repository from GitHub
 
-```bash
+\`\`\`bash
 git clone https://github.com/Jsrodrigue/sidekickAI.git
 cd sidekickAI
-```
+\`\`\`
 
 ### Option 1: Using venv and requirements.txt
-    python -m venv .venv
-    source .venv/bin/activate
-    pip install -r requirements.txt
+\`\`\`bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+\`\`\`
 
-(On Windows, activate with `.venv\\Scripts\\activate`)
+(On Windows, activate with \`.venv\\Scripts\\activate\`)
 
 ### Option 2: Using uv and pyproject.toml
 This project supports uv for fast dependency management.
 
-    uv venv
-    uv sync
+\`\`\`bash
+uv venv
+uv sync
+\`\`\`
 
 ## LangGraph Architecture Overview
-
 Sidekick uses a LangGraph-based agent loop with a single worker node and a tool execution node.
 
 The graph is designed to be simple, deterministic, and extensible.
 
 ### Nodes
 - Worker node  
-  - Main LLM node with tools bound
+  - Main LLM node with tools bound  
   - Builds a dynamic system prompt using:
     - Success criteria (if provided)
     - Current timestamp
@@ -110,7 +119,7 @@ The graph is designed to be simple, deterministic, and extensible.
   - Decides whether tools are needed based on the model output
 
 - Tool node  
-  - Executes tool calls emitted by the worker
+  - Executes tool calls emitted by the worker  
   - Supports multiple tool invocations per turn (with safety limits)
 
 ### Control Flow
@@ -122,10 +131,11 @@ The graph is designed to be simple, deterministic, and extensible.
 4. Worker → END when no further tool calls are needed
 
 ### Key Design Decisions
-- Tool usage is conditional and bounded per turn
-- Disabled tools are respected at runtime
-- The worker node is stateless beyond the shared graph state
-- Memory is injected via a checkpointer to persist conversations per folder
+- Tool usage is conditional and bounded per turn.
+- Disabled tools are respected at runtime.
+- The worker node is stateless beyond the shared graph state.
+- Memory is injected via a checkpointer to persist conversations per folder.
+- **RAG is treated as a tool**: it can be enabled/disabled and is not always invoked.
 
 This design makes the graph easy to extend with:
 - Additional decision nodes
@@ -134,14 +144,15 @@ This design makes the graph easy to extend with:
 - Multi-agent routing in the future
 
 ## How It Works (High Level)
-1. The user sends a message in a selected Knowledge Base folder.
+1. The user sends a message in a selected Knowledge Base folder (or without any folder).
 2. The LangGraph worker node processes the input.
-3. Relevant documents are retrieved if RAG is enabled.
-4. Tools are invoked only when necessary.
+3. If RAG is enabled and applicable, relevant documents are retrieved.
+4. Tools are invoked only when necessary (based on model decisions and enabled tool settings).
 5. The response is generated and saved to the folder-specific chat.
 
 ## Tools
-- RAG (Retrieval-Augmented Generation) for document-based answering.
+Sidekick exposes multiple tool groups. Any tool can be enabled/disabled at runtime, and the agent only uses tools when needed:
+- **RAG (Retrieval-Augmented Generation)** for document-based answering (optional tool, not always invoked).
 - File tools for reading, writing, and listing files.
 - Web search for external information.
 - Python execution for dynamic tasks.
