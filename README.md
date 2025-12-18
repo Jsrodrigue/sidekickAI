@@ -63,11 +63,65 @@ Managing multiple contexts and information sources is difficult in fast-paced en
   <strong>Main page</strong>
 </p>
 
+## Demo Video
+
+Click the image below to watch a full demo of **SidekickAI** on YouTube.
+
+[![SidekickAI Demo](https://img.youtube.com/vi/BiodhwA6oEg/0.jpg)](https://youtu.be/BiodhwA6oEg)
+
+## Installation
+### Clone the repository from GitHub
+
+```bash
+git clone https://github.com/Jsrodrigue/sidekickAI.git
+cd sidekickAI
+```
+
+### Option 1: Using venv and requirements.txt
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+(On Windows, activate with \`.venv\\Scripts\\activate\`)
+
+### Option 2: Using uv and pyproject.toml
+This project supports uv for fast dependency management.
+
+```bash
+uv venv
+uv sync
+```
+
+
 ## Usage
+
 1. Create an account.
 2. Log in to your workspace.
 3. Create or select a Knowledge Base folder.
 4. Chat with Sidekick inside the selected folder.
+
+### Run the application
+
+After installing dependencies, start the application using one of the following options:
+
+#### Option 1: Using Python directly
+
+Make sure your virtual environment is activated:
+
+```bash
+python app.py
+```
+
+#### Option 2: Using uv
+
+```bash
+uv run app.py
+```
+
+The application will start locally and you can access it through the URL shown in the terminal.
+
 
 ## Configuration Settings
 Each Knowledge Base can be configured independently:
@@ -79,30 +133,6 @@ Each Knowledge Base can be configured independently:
 OPENAI_API_KEY=your_openai_api_key_here  
 SERPER_API_KEY=your_serper_api_key_here  
 
-## Installation
-### Clone the repository from GitHub
-
-\`\`\`bash
-git clone https://github.com/Jsrodrigue/sidekickAI.git
-cd sidekickAI
-\`\`\`
-
-### Option 1: Using venv and requirements.txt
-\`\`\`bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-\`\`\`
-
-(On Windows, activate with \`.venv\\Scripts\\activate\`)
-
-### Option 2: Using uv and pyproject.toml
-This project supports uv for fast dependency management.
-
-\`\`\`bash
-uv venv
-uv sync
-\`\`\`
 
 ## LangGraph Architecture Overview
 Sidekick uses a LangGraph-based agent loop with a single worker node and a tool execution node.
