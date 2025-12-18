@@ -12,6 +12,29 @@ The project is built as a practical, extensible system that combines Large Langu
 - This design allows users to work on multiple topics or projects in parallel.
 - Chats and folders are persistent and can be resumed at any time.
 
+## Screenshots
+
+<p align="center">
+  <img src="screenshots/login_page.png" alt="login page" width="600" />
+  <br/>
+  <strong>Login page</strong>
+</p>
+
+---
+
+<p align="center">
+  <img src="screenshots/main_page.png" alt="Main page" width="600" />
+  <br/>
+  <strong>Main page</strong>
+</p>
+
+## Demo Video
+
+Click the image below to watch a full demo of **SidekickAI** on YouTube.
+
+[![SidekickAI Demo](https://img.youtube.com/vi/BiodhwA6oEg/0.jpg)](https://youtu.be/BiodhwA6oEg)
+
+
 ## Models and AI Stack
 - Chat Model: `gpt-4o-mini`  
   Chosen to reduce costs while maintaining strong reasoning and tool usage.
@@ -47,27 +70,6 @@ RAG (Retrieval-Augmented Generation) is implemented as **one of Sidekick’s too
 ## Why It Matters
 Managing multiple contexts and information sources is difficult in fast-paced environments. Sidekick reduces cognitive load by keeping knowledge bases and chats clearly separated while automating repetitive tasks and information retrieval.
 
-## Screenshots
-
-<p align="center">
-  <img src="screenshots/login_page.png" alt="login page" width="600" />
-  <br/>
-  <strong>Login page</strong>
-</p>
-
----
-
-<p align="center">
-  <img src="screenshots/main_page.png" alt="Main page" width="600" />
-  <br/>
-  <strong>Main page</strong>
-</p>
-
-## Demo Video
-
-Click the image below to watch a full demo of **SidekickAI** on YouTube.
-
-[![SidekickAI Demo](https://img.youtube.com/vi/BiodhwA6oEg/0.jpg)](https://youtu.be/BiodhwA6oEg)
 
 ## Installation
 ### Clone the repository from GitHub
