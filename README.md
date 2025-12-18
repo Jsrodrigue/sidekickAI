@@ -67,9 +67,6 @@ RAG (Retrieval-Augmented Generation) is implemented as **one of Sidekick’s too
 - If RAG is disabled (via tool settings) or if no folder/file context is selected, Sidekick will answer using the LLM and any other enabled tools.
 - This keeps the agent flexible: it can work as a general assistant, or as a knowledge-base assistant, depending on the session configuration.
 
-## Why It Matters
-Managing multiple contexts and information sources is difficult in fast-paced environments. Sidekick reduces cognitive load by keeping knowledge bases and chats clearly separated while automating repetitive tasks and information retrieval.
-
 
 ## Installation
 ### Clone the repository from GitHub
